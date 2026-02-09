@@ -97,8 +97,8 @@ export class AgentWebSocketServer {
     // Origin check
     if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
       const origin = req.headers.origin;
-      if (origin && !this.options.allowedOrigins.includes(origin)) {
-        this.log.warn({ origin }, "Rejected connection from disallowed origin");
+      if (!origin || !this.options.allowedOrigins.includes(origin)) {
+        this.log.warn({ origin: origin ?? "(none)" }, "Rejected connection: origin not in allowlist");
         ws.close(4003, "Origin not allowed");
         return;
       }
@@ -146,10 +146,6 @@ export class AgentWebSocketServer {
       return;
     }
 
-    if (result.legacy) {
-      this.log.warn("Received legacy message format (using 'content' instead of 'prompt'). Please update your client.");
-    }
-
     const { message } = result;
 
     switch (message.type) {
@@ -177,7 +173,7 @@ export class AgentWebSocketServer {
     // Switch runner if provider changed
     if (message.provider === "codex") {
       if (!(state.runner instanceof CodexRunner)) {
-        state.runner.dispose();
+        try { state.runner.dispose(); } catch { /* old runner already dead */ }
         state.runner = new CodexRunner({
           timeoutMs: this.options.timeoutMs,
           logger: this.log.child({ component: "codex-runner" }),
@@ -186,7 +182,7 @@ export class AgentWebSocketServer {
       }
     } else {
       if (!(state.runner instanceof ClaudeRunner)) {
-        state.runner.dispose();
+        try { state.runner.dispose(); } catch { /* old runner already dead */ }
         state.runner = this.createRunner();
       }
     }
@@ -264,7 +260,14 @@ export class AgentWebSocketServer {
         }
 
         state.isAlive = false;
-        ws.ping();
+        try {
+          ws.ping();
+        } catch {
+          this.log.debug("Ping failed, terminating connection");
+          state.runner.dispose();
+          this.connections.delete(ws);
+          ws.terminate();
+        }
       }
     }, HEARTBEAT_INTERVAL_MS);
   }

@@ -1,5 +1,11 @@
 // Maximum prompt size: 512KB
 const MAX_PROMPT_BYTES = 512 * 1024;
+// Maximum system prompt size: 64KB
+const MAX_SYSTEM_PROMPT_BYTES = 64 * 1024;
+// Maximum projectId length
+const MAX_PROJECT_ID_LENGTH = 128;
+// Allowed projectId characters: alphanumeric, hyphens, underscores, dots
+const PROJECT_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
 
 // --- Client → Agent messages ---
 
@@ -51,38 +57,10 @@ export type AgentMessage =
   | CompleteMessage
   | ErrorMessage;
 
-// --- Legacy format detection ---
-
-interface LegacyPromptMessage {
-  type: "prompt";
-  content: string;
-  projectId?: string;
-  files?: unknown[];
-  images?: unknown[];
-  model?: string;
-}
-
-export function isLegacyPrompt(data: Record<string, unknown>): boolean {
-  return (
-    data["type"] === "prompt" &&
-    typeof data["content"] === "string" &&
-    !("prompt" in data)
-  );
-}
-
-export function adaptLegacyMessage(data: Record<string, unknown>): PromptMessage {
-  return {
-    type: "prompt",
-    prompt: data["content"] as string,
-    model: typeof data["model"] === "string" ? data["model"] : undefined,
-    requestId: crypto.randomUUID(),
-  };
-}
-
 // --- Parsing & validation ---
 
 export type ParseResult =
-  | { ok: true; message: ClientMessage; legacy: boolean }
+  | { ok: true; message: ClientMessage }
   | { ok: false; error: string };
 
 export function parseClientMessage(raw: string): ParseResult {
@@ -107,15 +85,6 @@ export function parseClientMessage(raw: string): ParseResult {
 
   switch (type) {
     case "prompt": {
-      // Check legacy format first
-      if (isLegacyPrompt(obj)) {
-        return {
-          ok: true,
-          message: adaptLegacyMessage(obj),
-          legacy: true,
-        };
-      }
-
       const prompt = obj["prompt"];
       if (typeof prompt !== "string" || prompt.length === 0) {
         return { ok: false, error: "Missing or empty 'prompt' field" };
@@ -135,6 +104,19 @@ export function parseClientMessage(raw: string): ParseResult {
       const projectId = obj["projectId"];
       const provider = obj["provider"];
 
+      if (typeof systemPrompt === "string" && new TextEncoder().encode(systemPrompt).byteLength > MAX_SYSTEM_PROMPT_BYTES) {
+        return { ok: false, error: `System prompt exceeds maximum size of ${MAX_SYSTEM_PROMPT_BYTES} bytes` };
+      }
+
+      if (typeof projectId === "string") {
+        if (projectId.length > MAX_PROJECT_ID_LENGTH) {
+          return { ok: false, error: `projectId exceeds maximum length of ${MAX_PROJECT_ID_LENGTH}` };
+        }
+        if (!PROJECT_ID_PATTERN.test(projectId)) {
+          return { ok: false, error: "projectId contains invalid characters (allowed: alphanumeric, hyphens, underscores, dots)" };
+        }
+      }
+
       return {
         ok: true,
         message: {
@@ -146,7 +128,6 @@ export function parseClientMessage(raw: string): ParseResult {
           requestId,
           provider: provider === "codex" ? "codex" : "claude",
         },
-        legacy: false,
       };
     }
 
@@ -158,12 +139,11 @@ export function parseClientMessage(raw: string): ParseResult {
           type: "cancel",
           requestId: typeof requestId === "string" ? requestId : undefined,
         },
-        legacy: false,
       };
     }
 
     default:
-      return { ok: false, error: `Unknown message type: ${type}` };
+      return { ok: false, error: `Unknown message type: ${String(type).slice(0, 50)}` };
   }
 }
 

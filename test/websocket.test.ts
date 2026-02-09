@@ -1,8 +1,5 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { WebSocket } from "ws";
-
-vi.mock("node-pty", () => ({ spawn: vi.fn() }));
-
 import { AgentWebSocketServer } from "../src/server/websocket.js";
 import type { Runner, RunOptions, RunHandlers } from "../src/process/claude-runner.js";
 import pino from "pino";
@@ -52,7 +49,6 @@ function nextMessage(ws: WebSocket): Promise<Record<string, unknown>> {
 describe("AgentWebSocketServer", () => {
   let server: AgentWebSocketServer;
   let client: WebSocket;
-  let mockRunner: MockRunner;
   let port: number;
 
   afterEach(async () => {
@@ -155,29 +151,6 @@ describe("AgentWebSocketServer", () => {
 
     expect(msg["type"]).toBe("error");
     expect(msg["message"]).toBe("Invalid JSON");
-  });
-
-  it("handles legacy format messages", async () => {
-    const ctx = createServer();
-    await server.start();
-
-    const { client: c } = await connect(port);
-    client = c;
-
-    client.send(JSON.stringify({
-      type: "prompt",
-      content: "Hello from old client",
-      projectId: "proj-1",
-      files: [],
-      model: "opus",
-    }));
-
-    await new Promise((r) => setTimeout(r, 50));
-
-    const runner = ctx.runner();
-    expect(runner.lastOptions?.prompt).toBe("Hello from old client");
-    expect(runner.lastOptions?.model).toBe("opus");
-    expect(runner.lastOptions?.requestId).toBeDefined();
   });
 
   it("disposes runner on client disconnect", async () => {

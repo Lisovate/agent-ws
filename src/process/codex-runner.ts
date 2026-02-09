@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import type { Logger } from "../utils/logger.js";
@@ -65,7 +65,12 @@ export class CodexRunner implements Runner {
 
     let cwd: string | undefined;
     if (projectId) {
-      cwd = join(tmpdir(), this.sessionDir, projectId);
+      const base = resolve(tmpdir(), this.sessionDir);
+      cwd = resolve(base, projectId);
+      if (!cwd.startsWith(base + "/") && cwd !== base) {
+        handlers.onError("Invalid projectId", requestId);
+        return;
+      }
       mkdirSync(cwd, { recursive: true });
     }
 
@@ -98,10 +103,19 @@ export class CodexRunner implements Runner {
       this.process.stdin.end();
     }
 
+    // Guard against double handler invocation (e.g. error + exit both firing)
+    let handlersDone = false;
+    const finish = (cb: () => void) => {
+      if (handlersDone) return;
+      handlersDone = true;
+      this.clearTimeout();
+      cb();
+    };
+
     this.timeout = setTimeout(() => {
       this.log.warn({ requestId }, "Codex process timed out");
       this.kill();
-      handlers.onError("Process timed out", requestId);
+      finish(() => handlers.onError("Process timed out", requestId));
     }, this.timeoutMs);
 
     if (this.process.stdout) {
@@ -120,8 +134,7 @@ export class CodexRunner implements Runner {
       });
     }
 
-    this.process.on("exit", (exitCode) => {
-      this.clearTimeout();
+    this.process.on("exit", (exitCode, signal) => {
       this.process = null;
 
       if (this.killed) {
@@ -129,20 +142,22 @@ export class CodexRunner implements Runner {
         return;
       }
 
-      if (exitCode === 0 || exitCode === null) {
+      if (exitCode === 0) {
         this.log.info({ requestId }, "Codex process completed successfully");
-        handlers.onComplete(requestId);
+        finish(() => handlers.onComplete(requestId));
       } else {
-        this.log.warn({ requestId, exitCode }, "Codex process exited with non-zero code");
-        handlers.onError(`Codex CLI exited with code ${exitCode}`, requestId);
+        const reason = exitCode !== null
+          ? `Codex CLI exited with code ${exitCode}`
+          : `Codex CLI killed by signal ${signal ?? "unknown"}`;
+        this.log.warn({ requestId, exitCode, signal }, reason);
+        finish(() => handlers.onError(reason, requestId));
       }
     });
 
     this.process.on("error", (err) => {
-      this.clearTimeout();
       this.process = null;
       this.log.error({ err, requestId }, "Codex process error");
-      handlers.onError(err.message, requestId);
+      finish(() => handlers.onError(err.message, requestId));
     });
   }
 

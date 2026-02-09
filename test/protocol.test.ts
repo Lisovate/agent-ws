@@ -2,8 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   parseClientMessage,
   serializeMessage,
-  isLegacyPrompt,
-  adaptLegacyMessage,
   type AgentMessage,
 } from "../src/server/protocol.js";
 
@@ -19,7 +17,6 @@ describe("parseClientMessage", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.legacy).toBe(false);
     expect(result.message).toEqual({
       type: "prompt",
       prompt: "Hello Claude",
@@ -133,73 +130,6 @@ describe("parseClientMessage", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toMatch(/exceeds maximum size/);
-  });
-});
-
-describe("legacy message detection", () => {
-  it("detects legacy prompt with content field", () => {
-    const data = { type: "prompt", content: "hello", projectId: "p1" } as Record<string, unknown>;
-    expect(isLegacyPrompt(data)).toBe(true);
-  });
-
-  it("does not flag new format as legacy", () => {
-    const data = { type: "prompt", prompt: "hello", requestId: "r1" } as Record<string, unknown>;
-    expect(isLegacyPrompt(data)).toBe(false);
-  });
-
-  it("does not flag cancel as legacy", () => {
-    const data = { type: "cancel" } as Record<string, unknown>;
-    expect(isLegacyPrompt(data)).toBe(false);
-  });
-});
-
-describe("adaptLegacyMessage", () => {
-  it("adapts legacy message to new format", () => {
-    const adapted = adaptLegacyMessage({
-      type: "prompt",
-      content: "hello from old client",
-      projectId: "p1",
-      files: [],
-      images: [],
-      model: "opus",
-    });
-
-    expect(adapted.type).toBe("prompt");
-    expect(adapted.prompt).toBe("hello from old client");
-    expect(adapted.model).toBe("opus");
-    expect(adapted.requestId).toBeDefined();
-    expect(adapted.requestId.length).toBeGreaterThan(0);
-  });
-
-  it("handles legacy message without model", () => {
-    const adapted = adaptLegacyMessage({
-      type: "prompt",
-      content: "hello",
-    });
-
-    expect(adapted.model).toBeUndefined();
-  });
-});
-
-describe("parseClientMessage with legacy format", () => {
-  it("parses legacy prompt and marks as legacy", () => {
-    const result = parseClientMessage(
-      JSON.stringify({
-        type: "prompt",
-        content: "hello old world",
-        projectId: "proj-1",
-        files: [{ path: "a.tsx", content: "code" }],
-        model: "sonnet",
-      })
-    );
-
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.legacy).toBe(true);
-    expect(result.message.type).toBe("prompt");
-    if (result.message.type !== "prompt") return;
-    expect(result.message.prompt).toBe("hello old world");
-    expect(result.message.model).toBe("sonnet");
   });
 });
 

@@ -3,6 +3,9 @@ import { stripVTControlCharacters } from "node:util";
 /**
  * Clean PTY output by removing ANSI/VT control sequences, carriage returns, and BEL characters.
  * Uses Node.js built-in `stripVTControlCharacters` (available since Node 16.11).
+ *
+ * Exported as a library utility for consumers who use PTY-based transports.
+ * The built-in runners use stdio pipes and don't require this internally.
  */
 export function cleanOutput(data: string): string {
   // 1. Strip OSC sequences (ESC ] ... BEL/ST) first, since they use BEL as terminator

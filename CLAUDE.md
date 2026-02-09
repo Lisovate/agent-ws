@@ -4,13 +4,13 @@ You are working on agent-ws, a standalone WebSocket bridge for CLI AI agents (Cl
 
 ## Project Overview
 
-agent-ws is a TypeScript Node.js process that bridges any frontend with CLI AI agents over WebSocket. It is a **dumb pipe** — no prompt engineering, no credential handling, just transport.
+agent-ws is a TypeScript Node.js process that bridges any WebSocket client with CLI AI agents. It is a **dumb pipe** — no prompt engineering, no credential handling, just transport. Any client can connect: browser frontends, backend services, scripts, other CLI tools.
 
 **Key principle: Local-first.** All AI processing happens on the user's machine using their existing CLI agent authentication.
 
 ## Tech Stack
 
-- Node.js 18+ (TypeScript, ESM)
+- Node.js 20+ (TypeScript, ESM)
 - ws (WebSocket server)
 - commander (CLI argument parsing)
 - pino (structured logging)
@@ -21,16 +21,16 @@ agent-ws is a TypeScript Node.js process that bridges any frontend with CLI AI a
 
 ```
 ┌───────────────┐     WebSocket      ┌─────────────┐      stdio       ┌─────────────┐
-│ Your Frontend │ <=================> │  agent-ws   │ <===============> │ Claude Code │
-│   (Browser)   │   localhost:9999   │  (Node.js)  │   --print --json │  / Codex    │
+│  Your App     │ <=================> │  agent-ws   │ <===============> │ Claude Code │
+│  (any client) │   localhost:9999   │  (Node.js)  │   --print --json │  / Codex    │
 └───────────────┘                    └─────────────┘                   └─────────────┘
 ```
 
 1. User runs `agent-ws` on their machine
 2. Agent starts WebSocket server on localhost:9999
 3. Each connection gets its own CLI process
-4. User sends prompt → agent spawns the appropriate CLI agent
-5. Response streams back to browser in real-time
+4. Client sends prompt → agent spawns the appropriate CLI agent
+5. Response streams back in real-time
 
 ## Commands
 
@@ -66,7 +66,7 @@ agent-ws/
 │   ├── agent.ts               # Orchestrator: wires server + logger
 │   ├── server/
 │   │   ├── websocket.ts       # WS server, heartbeat, per-connection state
-│   │   └── protocol.ts        # Message types, validation, legacy adapter
+│   │   └── protocol.ts        # Message types, validation
 │   ├── process/
 │   │   ├── claude-runner.ts   # Claude Code process spawn/kill/timeout
 │   │   ├── codex-runner.ts    # Codex process spawn/kill/timeout
@@ -75,7 +75,7 @@ agent-ws/
 │       ├── logger.ts          # Pino logger factory
 │       └── claude-check.ts    # Claude CLI availability check
 ├── test/
-│   ├── protocol.test.ts       # Message parsing, validation, legacy
+│   ├── protocol.test.ts       # Message parsing, validation
 │   ├── output-cleaner.test.ts # ANSI/VT sequence stripping
 │   └── websocket.test.ts      # Integration: WS server with mock runner
 ├── build.js                   # esbuild bundler config
@@ -102,13 +102,9 @@ agent-ws/
 { type: "error", message: string, requestId?: string }
 ```
 
-### Backward Compatibility
-
-Legacy messages using `content` instead of `prompt` (without `requestId`) are auto-adapted. Deprecation warning logged.
-
 ## Key Architecture Decisions
 
-- **Dumb pipe**: No prompt engineering. All prompt construction happens in the frontend.
+- **Dumb pipe**: No prompt engineering. All prompt construction happens in the client.
 - **Per-connection processes**: Each WebSocket gets its own `Runner` instance.
 - **Runner interface**: `Runner` interface allows test injection without real process spawning.
 - **Configurable identity**: `agentName` and `sessionDir` options let consumers customise the agent.
@@ -126,7 +122,7 @@ Legacy messages using `content` instead of `prompt` (without `requestId`) are au
 
 ## Testing
 
-Tests use `vi.mock("node-pty")` to avoid PTY dependency in the test environment. The `Runner` interface enables clean dependency injection for the WebSocket server tests.
+The `Runner` interface enables clean dependency injection for the WebSocket server tests.
 
 ```bash
 npm test                     # Run all tests

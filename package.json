@@ -45,19 +45,19 @@
     "url": "https://github.com/Lisovate/agent-ws/issues"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
-    "commander": "^13.0.0",
-    "pino": "^9.0.0",
+    "commander": "^14.0.3",
+    "pino": "^10.3.1",
     "pino-pretty": "^13.0.0",
     "ws": "^8.16.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^25.2.2",
     "@types/ws": "^8.5.0",
-    "esbuild": "^0.24.0",
+    "esbuild": "^0.27.3",
     "typescript": "^5.7.0",
-    "vitest": "^2.1.0"
+    "vitest": "^4.0.18"
   }
 }

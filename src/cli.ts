@@ -2,12 +2,15 @@ import { Command } from "commander";
 import { AgentWS } from "./agent.js";
 import { checkClaudeCli } from "./utils/claude-check.js";
 
+declare const PKG_VERSION: string;
+const VERSION = typeof PKG_VERSION !== "undefined" ? PKG_VERSION : "0.0.0-dev";
+
 const program = new Command();
 
 program
   .name("agent-ws")
   .description("WebSocket bridge for CLI AI agents (Claude, Codex)")
-  .version("0.3.0")
+  .version(VERSION)
   .option("-p, --port <port>", "WebSocket server port", "9999")
   .option("-H, --host <host>", "WebSocket server host", "localhost")
   .option("-c, --claude-path <path>", "Path to Claude CLI", "claude")
@@ -25,7 +28,7 @@ program
     // Banner
     console.log(`
 ╔═══════════════════════════════════════╗
-║          agent-ws v0.3.0             ║
+║          agent-ws v${VERSION.padEnd(20)}║
 ║     CLI AI Agent Bridge              ║
 ╚═══════════════════════════════════════╝
 `);
@@ -54,7 +57,17 @@ program
     }
     const timeoutMs = timeoutSeconds * 1000;
 
-    const allowedOrigins = opts.origins?.split(",").map((o) => o.trim());
+    const allowedOrigins = opts.origins?.split(",").map((o) => o.trim()).filter(Boolean);
+    if (allowedOrigins) {
+      for (const origin of allowedOrigins) {
+        try {
+          new URL(origin);
+        } catch {
+          console.error(`Invalid origin: "${origin}" (must be a valid URL, e.g. https://example.com)`);
+          process.exit(1);
+        }
+      }
+    }
 
     const agent = new AgentWS({
       port,

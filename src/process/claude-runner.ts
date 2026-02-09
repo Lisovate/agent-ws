@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import type { Logger } from "../utils/logger.js";
@@ -89,7 +89,12 @@ export class ClaudeRunner implements Runner {
     // (Claude CLI scopes sessions by working directory)
     let cwd: string | undefined;
     if (projectId) {
-      cwd = join(tmpdir(), this.sessionDir, projectId);
+      const base = resolve(tmpdir(), this.sessionDir);
+      cwd = resolve(base, projectId);
+      if (!cwd.startsWith(base + "/") && cwd !== base) {
+        handlers.onError("Invalid projectId", requestId);
+        return;
+      }
       mkdirSync(cwd, { recursive: true });
     }
 
@@ -123,11 +128,20 @@ export class ClaudeRunner implements Runner {
       this.process.stdin.end();
     }
 
+    // Guard against double handler invocation (e.g. error + exit both firing)
+    let handlersDone = false;
+    const finish = (cb: () => void) => {
+      if (handlersDone) return;
+      handlersDone = true;
+      this.clearTimeout();
+      cb();
+    };
+
     // Set up timeout
     this.timeout = setTimeout(() => {
       this.log.warn({ requestId }, "Claude process timed out");
       this.kill();
-      handlers.onError("Process timed out", requestId);
+      finish(() => handlers.onError("Process timed out", requestId));
     }, this.timeoutMs);
 
     // Parse NDJSON from stdout
@@ -149,30 +163,30 @@ export class ClaudeRunner implements Runner {
     }
 
     // Handle exit
-    this.process.on("exit", (exitCode) => {
-      this.clearTimeout();
+    this.process.on("exit", (exitCode, signal) => {
       this.process = null;
 
       if (this.killed) {
-        // Killed (cancelled) — don't send complete
         this.log.debug({ requestId }, "Claude process was killed");
         return;
       }
 
-      if (exitCode === 0 || exitCode === null) {
+      if (exitCode === 0) {
         this.log.info({ requestId }, "Claude process completed successfully");
-        handlers.onComplete(requestId);
+        finish(() => handlers.onComplete(requestId));
       } else {
-        this.log.warn({ requestId, exitCode }, "Claude process exited with non-zero code");
-        handlers.onError(`Claude CLI exited with code ${exitCode}`, requestId);
+        const reason = exitCode !== null
+          ? `Claude CLI exited with code ${exitCode}`
+          : `Claude CLI killed by signal ${signal ?? "unknown"}`;
+        this.log.warn({ requestId, exitCode, signal }, reason);
+        finish(() => handlers.onError(reason, requestId));
       }
     });
 
     this.process.on("error", (err) => {
-      this.clearTimeout();
       this.process = null;
       this.log.error({ err, requestId }, "Claude process error");
-      handlers.onError(err.message, requestId);
+      finish(() => handlers.onError(err.message, requestId));
     });
   }
 

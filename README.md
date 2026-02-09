@@ -4,7 +4,7 @@ WebSocket bridge for CLI AI agents. Stream responses from Claude Code and Codex 
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js 20+
 - At least one supported CLI agent installed:
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`npm install -g @anthropic-ai/claude-code`)
   - [Codex](https://github.com/openai/codex) (`npm install -g @openai/codex`)
@@ -17,6 +17,13 @@ npm install -g agent-ws
 
 # Or run directly
 npx agent-ws
+
+# Or clone and run locally
+git clone https://github.com/Lisovate/agent-ws.git
+cd agent-ws
+npm install
+npm run build
+npm start
 ```
 
 ## Quick Start
@@ -25,7 +32,7 @@ npx agent-ws
 # Start the WebSocket bridge
 agent-ws
 
-# Connect from your frontend via WebSocket on ws://localhost:9999
+# Connect via WebSocket on ws://localhost:9999
 ```
 
 ## Library Usage
@@ -60,16 +67,16 @@ await agent.start();
 
 ```
 ┌───────────────┐     WebSocket      ┌─────────────┐      stdio       ┌─────────────┐
-│ Your Frontend │ <=================> │  agent-ws   │ <===============> │ Claude Code │
-│   (Browser)   │   localhost:9999   │  (Node.js)  │   --print --json │  / Codex    │
+│  Your App     │ <=================> │  agent-ws   │ <===============> │ Claude Code │
+│  (any client) │   localhost:9999   │  (Node.js)  │   --print --json │  / Codex    │
 └───────────────┘                    └─────────────┘                   └─────────────┘
 ```
 
-Each WebSocket connection gets its own CLI process. The agent:
+Any WebSocket client can connect — browser frontends, backend services, scripts, other CLI tools. Each connection gets its own CLI process. The agent:
 1. Accepts WebSocket connections on localhost
-2. Receives prompt messages from your frontend
+2. Receives prompt messages from your client
 3. Spawns the appropriate CLI agent (Claude Code or Codex)
-4. Streams output back to the browser in real-time
+4. Streams output back in real-time
 5. Manages process lifecycle (timeout, cancellation, cleanup)
 
 ## Supported Agents
@@ -97,14 +104,10 @@ Each WebSocket connection gets its own CLI process. The agent:
 { "type": "error", "message": "Process timed out", "requestId": "uuid" }
 ```
 
-### Backward Compatibility
-
-Legacy messages using `content` instead of `prompt` (and without `requestId`) are automatically adapted. A deprecation warning is logged.
-
 ## Security
 
 - **Local only**: Binds to `localhost` by default
-- **Origin validation**: Optional `--origins` flag restricts browser origins
+- **Origin validation**: Optional `--origins` flag restricts allowed origins
 - **No credentials**: Never stores or transmits API keys
 - **Process isolation**: One CLI process per connection
 - **Message limits**: 1MB max WebSocket payload, 512KB max prompt size
@@ -129,7 +132,7 @@ src/
 ├── agent.ts               # Orchestrator: wires server + logger
 ├── server/
 │   ├── websocket.ts       # WebSocket server, heartbeat, per-connection state
-│   └── protocol.ts        # Message types, validation, legacy adapter
+│   └── protocol.ts        # Message types, validation
 ├── process/
 │   ├── claude-runner.ts   # Claude Code process spawn/kill/timeout
 │   ├── codex-runner.ts    # Codex process spawn/kill/timeout

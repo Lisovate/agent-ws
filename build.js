@@ -1,4 +1,7 @@
 import { build } from "esbuild";
+import { readFileSync } from "node:fs";
+
+const pkg = JSON.parse(readFileSync("package.json", "utf-8"));
 
 const shared = {
   bundle: true,
@@ -7,6 +10,9 @@ const shared = {
   format: "esm",
   external: ["ws", "pino", "pino-pretty", "commander"],
   sourcemap: true,
+  define: {
+    PKG_VERSION: JSON.stringify(pkg.version),
+  },
 };
 
 await Promise.all([
