@@ -70,6 +70,7 @@ export class ClaudeRunner implements Runner {
 
     const args = [
       "--print",
+      "--verbose",
       "--output-format", "stream-json",
       "--max-turns", "1",  // Single-turn text output, no agentic loops
       "--tools", "",       // Disable tool use — we only want generated text
