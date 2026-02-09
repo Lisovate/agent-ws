@@ -17,6 +17,7 @@ export interface PromptMessage {
   projectId?: string;
   requestId: string;
   provider?: "claude" | "codex";
+  thinkingTokens?: number;
 }
 
 export interface CancelMessage {
@@ -38,6 +39,7 @@ export interface ChunkMessage {
   type: "chunk";
   content: string;
   requestId: string;
+  thinking?: boolean;
 }
 
 export interface CompleteMessage {
@@ -103,6 +105,7 @@ export function parseClientMessage(raw: string): ParseResult {
       const systemPrompt = obj["systemPrompt"];
       const projectId = obj["projectId"];
       const provider = obj["provider"];
+      const thinkingTokens = obj["thinkingTokens"];
 
       if (typeof systemPrompt === "string" && new TextEncoder().encode(systemPrompt).byteLength > MAX_SYSTEM_PROMPT_BYTES) {
         return { ok: false, error: `System prompt exceeds maximum size of ${MAX_SYSTEM_PROMPT_BYTES} bytes` };
@@ -127,6 +130,7 @@ export function parseClientMessage(raw: string): ParseResult {
           projectId: typeof projectId === "string" ? projectId : undefined,
           requestId,
           provider: provider === "codex" ? "codex" : "claude",
+          thinkingTokens: typeof thinkingTokens === "number" && thinkingTokens >= 0 ? thinkingTokens : undefined,
         },
       };
     }

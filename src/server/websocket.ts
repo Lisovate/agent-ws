@@ -188,9 +188,9 @@ export class AgentWebSocketServer {
     }
 
     const handlers: RunHandlers = {
-      onChunk: (content, requestId) => {
+      onChunk: (content, requestId, thinking) => {
         try {
-          this.sendMessage(ws, { type: "chunk", content, requestId });
+          this.sendMessage(ws, { type: "chunk", content, requestId, ...(thinking ? { thinking: true } : {}) });
         } catch (err) {
           this.log.warn({ err, requestId }, "Error in onChunk handler");
         }
@@ -214,7 +214,7 @@ export class AgentWebSocketServer {
     };
 
     state.runner.run(
-      { prompt: message.prompt, model: message.model, systemPrompt: message.systemPrompt, projectId: message.projectId, requestId: message.requestId },
+      { prompt: message.prompt, model: message.model, systemPrompt: message.systemPrompt, projectId: message.projectId, requestId: message.requestId, thinkingTokens: message.thinkingTokens },
       handlers,
     );
   }

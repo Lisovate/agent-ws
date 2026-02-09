@@ -89,18 +89,24 @@ agent-ws/
 ### Client → Agent
 
 ```typescript
-{ type: "prompt", prompt: string, requestId: string, model?: string, provider?: "claude" | "codex" }
+{ type: "prompt", prompt: string, requestId: string, model?: string, provider?: "claude" | "codex", projectId?: string, systemPrompt?: string, thinkingTokens?: number }
 { type: "cancel", requestId?: string }
 ```
+
+- `projectId` scopes CLI session by CWD and enables `--continue` for multi-turn. Alphanumeric/hyphens/underscores/dots only, max 128 chars.
+- `systemPrompt` is passed via `--append-system-prompt` (max 64KB).
+- `thinkingTokens` controls thinking budget. `0` disables thinking. Omit to let Claude decide.
 
 ### Agent → Client
 
 ```typescript
 { type: "connected", version: "1.0", agent: "agent-ws" }
-{ type: "chunk", content: string, requestId: string }
+{ type: "chunk", content: string, requestId: string, thinking?: boolean }
 { type: "complete", requestId: string }
 { type: "error", message: string, requestId?: string }
 ```
+
+Chunks with `thinking: true` contain Claude's reasoning (streamed when `thinkingTokens > 0`).
 
 ## Key Architecture Decisions
 

@@ -83,7 +83,7 @@ Any WebSocket client can connect — browser frontends, backend services, script
 
 | Agent | Provider field | CLI |
 |-------|---------------|-----|
-| Claude Code | `"claude"` (default) | `claude --print --continue` |
+| Claude Code | `"claude"` (default) | `claude --print` (+ `--continue` when `projectId` is set) |
 | Codex | `"codex"` | `codex --json` |
 
 ## Protocol
@@ -92,17 +92,31 @@ Any WebSocket client can connect — browser frontends, backend services, script
 
 ```json
 { "type": "prompt", "prompt": "Build a login form", "requestId": "uuid", "model": "opus", "provider": "claude" }
+{ "type": "prompt", "prompt": "...", "requestId": "uuid", "projectId": "my-app", "systemPrompt": "...", "thinkingTokens": 2048 }
 { "type": "cancel", "requestId": "uuid" }
 ```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `prompt` | yes | The prompt text (max 512KB) |
+| `requestId` | yes | Unique request identifier |
+| `model` | no | Model name (e.g. `"sonnet"`, `"opus"`) |
+| `provider` | no | `"claude"` (default) or `"codex"` |
+| `projectId` | no | Scopes CLI session by directory. Enables `--continue` for multi-turn. Alphanumeric, hyphens, underscores, dots only. |
+| `systemPrompt` | no | Appended as system prompt (max 64KB) |
+| `thinkingTokens` | no | Max thinking tokens. `0` disables thinking. Omit to let Claude decide. |
 
 ### Agent → Client
 
 ```json
 { "type": "connected", "version": "1.0", "agent": "agent-ws" }
 { "type": "chunk", "content": "Here's a login form...", "requestId": "uuid" }
+{ "type": "chunk", "content": "Let me think...", "requestId": "uuid", "thinking": true }
 { "type": "complete", "requestId": "uuid" }
 { "type": "error", "message": "Process timed out", "requestId": "uuid" }
 ```
+
+Chunks with `thinking: true` contain Claude's reasoning. Clients can display these as a thinking indicator or ignore them.
 
 ## Security
 

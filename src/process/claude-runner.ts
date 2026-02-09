@@ -11,10 +11,11 @@ export interface RunOptions {
   systemPrompt?: string;
   projectId?: string;
   requestId: string;
+  thinkingTokens?: number;
 }
 
 export interface RunHandlers {
-  onChunk: (content: string, requestId: string) => void;
+  onChunk: (content: string, requestId: string, thinking?: boolean) => void;
   onComplete: (requestId: string) => void;
   onError: (message: string, requestId: string) => void;
 }
@@ -65,14 +66,18 @@ export class ClaudeRunner implements Runner {
     // Kill any existing process first
     this.kill();
 
-    const { prompt, model, systemPrompt, projectId, requestId } = options;
+    const { prompt, model, systemPrompt, projectId, requestId, thinkingTokens } = options;
 
     const args = [
-      "--print", "--verbose", "--continue",
+      "--print",
       "--output-format", "stream-json",
       "--max-turns", "1",  // Single-turn text output, no agentic loops
       "--tools", "",       // Disable tool use — we only want generated text
     ];
+    // Only resume session when a projectId is provided (scoped by CWD)
+    if (projectId) {
+      args.push("--continue");
+    }
     if (model) {
       args.push("--model", model);
     }
@@ -103,7 +108,10 @@ export class ClaudeRunner implements Runner {
         "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
         "ANTHROPIC_API_KEY", "NODE_PATH", "XDG_CONFIG_HOME",
       ];
-      const env: Record<string, string> = { MAX_THINKING_TOKENS: "2048" };
+      const env: Record<string, string> = {};
+      if (thinkingTokens !== undefined) {
+        env["MAX_THINKING_TOKENS"] = String(thinkingTokens);
+      }
       for (const key of ALLOWED_ENV_KEYS) {
         if (process.env[key]) env[key] = process.env[key]!;
       }
@@ -193,12 +201,12 @@ export class ClaudeRunner implements Runner {
   /**
    * Parse a single NDJSON line from Claude CLI's stream-json output.
    *
-   * The stream-json format can emit several event types. We look for text
-   * content in these known patterns (in priority order):
+   * The stream-json format can emit several event types. We look for content
+   * in these known patterns (in priority order):
    *
-   * 1. Raw Anthropic API event: { type: "content_block_delta", delta: { type: "text_delta", text } }
+   * 1. Raw Anthropic API event: { type: "content_block_delta", delta: { type: "text_delta"|"thinking_delta", text|thinking } }
    * 2. Wrapped stream event:    { type: "stream_event", event: { type: "content_block_delta", ... } }
-   * 3. Complete assistant msg:   { type: "assistant", message: { content: [{ type: "text", text }] } }
+   * 3. Complete assistant msg:   { type: "assistant", message: { content: [{ type: "text"|"thinking", text|thinking }] } }
    */
   private parseStreamLine(line: string, handlers: RunHandlers, requestId: string): void {
     if (!line.trim()) return;
@@ -207,16 +215,24 @@ export class ClaudeRunner implements Runner {
       const event = JSON.parse(line);
 
       // Pattern 1: Raw content_block_delta
-      if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) {
-        handlers.onChunk(event.delta.text, requestId);
+      if (event.type === "content_block_delta") {
+        if (event.delta?.type === "text_delta" && event.delta.text) {
+          handlers.onChunk(event.delta.text, requestId);
+        } else if (event.delta?.type === "thinking_delta" && event.delta.thinking) {
+          handlers.onChunk(event.delta.thinking, requestId, true);
+        }
         return;
       }
 
       // Pattern 2: Wrapped in stream_event
       if (event.type === "stream_event" && event.event) {
         const inner = event.event;
-        if (inner.type === "content_block_delta" && inner.delta?.type === "text_delta" && inner.delta.text) {
-          handlers.onChunk(inner.delta.text, requestId);
+        if (inner.type === "content_block_delta") {
+          if (inner.delta?.type === "text_delta" && inner.delta.text) {
+            handlers.onChunk(inner.delta.text, requestId);
+          } else if (inner.delta?.type === "thinking_delta" && inner.delta.thinking) {
+            handlers.onChunk(inner.delta.thinking, requestId, true);
+          }
         }
         return;
       }
@@ -226,6 +242,8 @@ export class ClaudeRunner implements Runner {
         for (const block of event.message.content) {
           if (block.type === "text" && block.text) {
             handlers.onChunk(block.text, requestId);
+          } else if (block.type === "thinking" && block.thinking) {
+            handlers.onChunk(block.thinking, requestId, true);
           }
         }
         return;
