@@ -1,6 +1,6 @@
 {
   "name": "agent-ws",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "WebSocket bridge for CLI AI agents — stream Claude and Codex CLI responses over WebSocket",
   "type": "module",
   "main": "dist/index.js",
@@ -38,7 +38,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Lisovate/agent-ws.git"
+    "url": "git+https://github.com/Lisovate/agent-ws.git"
   },
   "homepage": "https://github.com/Lisovate/agent-ws#readme",
   "bugs": {
