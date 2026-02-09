@@ -1,0 +1,63 @@
+{
+  "name": "agent-ws",
+  "version": "0.3.0",
+  "description": "WebSocket bridge for CLI AI agents — stream Claude and Codex CLI responses over WebSocket",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agent-ws": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "scripts": {
+    "build": "node build.js",
+    "dev": "node --watch src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "prepublishOnly": "npm run clean && npm run build && npm run typecheck && npm test"
+  },
+  "keywords": [
+    "claude",
+    "codex",
+    "ai",
+    "cli",
+    "agent",
+    "bridge",
+    "claude-code",
+    "websocket",
+    "streaming"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pblittle/agent-ws.git"
+  },
+  "homepage": "https://github.com/pblittle/agent-ws#readme",
+  "bugs": {
+    "url": "https://github.com/pblittle/agent-ws/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "commander": "^13.0.0",
+    "pino": "^9.0.0",
+    "pino-pretty": "^13.0.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}
