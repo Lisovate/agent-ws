@@ -22,4 +22,4 @@ agent-ws runs locally on your machine and bridges WebSocket connections to CLI A
 
 | Version | Supported |
 |---------|-----------|
-| 0.x     | Latest release only |
+| 1.x     | Latest release only |

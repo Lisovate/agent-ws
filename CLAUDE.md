@@ -22,7 +22,7 @@ agent-ws is a TypeScript Node.js process that bridges any WebSocket client with 
 ```
 ┌───────────────┐     WebSocket      ┌─────────────┐      stdio       ┌─────────────┐
 │  Your App     │ <=================> │  agent-ws   │ <===============> │ Claude Code │
-│  (any client) │   localhost:9999   │  (Node.js)  │   --print --json │  / Codex    │
+│  (any client) │   localhost:9999   │  (Node.js)  │      stdio       │  / Codex    │
 └───────────────┘                    └─────────────┘                   └─────────────┘
 ```
 

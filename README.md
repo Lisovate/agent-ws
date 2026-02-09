@@ -35,7 +35,9 @@ agent-ws
 # Connect via WebSocket on ws://localhost:9999
 ```
 
-## Library Usage
+## Library Usage (Node.js only)
+
+If you want to embed the WebSocket server into your own Node.js backend (e.g. Express, Fastify, or a Next.js API route) instead of running the CLI:
 
 ```typescript
 import { AgentWS } from "agent-ws";
@@ -49,6 +51,8 @@ const agent = new AgentWS({
 
 await agent.start();
 ```
+
+> **Note:** This is server-side only. Browser/React clients should connect to the running agent-ws server as a WebSocket client (see [Protocol](#protocol)).
 
 ## CLI Options
 
@@ -68,7 +72,7 @@ await agent.start();
 ```
 ┌───────────────┐     WebSocket      ┌─────────────┐      stdio       ┌─────────────┐
 │  Your App     │ <=================> │  agent-ws   │ <===============> │ Claude Code │
-│  (any client) │   localhost:9999   │  (Node.js)  │   --print --json │  / Codex    │
+│  (any client) │   localhost:9999   │  (Node.js)  │      stdio       │  / Codex    │
 └───────────────┘                    └─────────────┘                   └─────────────┘
 ```
 
@@ -83,7 +87,7 @@ Any WebSocket client can connect — browser frontends, backend services, script
 
 | Agent | Provider field | CLI |
 |-------|---------------|-----|
-| Claude Code | `"claude"` (default) | `claude --print` (+ `--continue` when `projectId` is set) |
+| Claude Code | `"claude"` (default) | `claude --print --verbose --output-format stream-json` |
 | Codex | `"codex"` | `codex --json` |
 
 ## Protocol
