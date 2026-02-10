@@ -20,6 +20,7 @@ export class CodexRunner implements Runner {
   private timeout: NodeJS.Timeout | null = null;
   private disposed = false;
   private killed = false;
+  private threadId: string | null = null;
   private readonly codexPath: string;
   private readonly timeoutMs: number;
   private readonly log: Logger;
@@ -53,8 +54,12 @@ export class CodexRunner implements Runner {
       fullPrompt = `${systemPrompt}\n\n---\n\n${prompt}`;
     }
 
-    const args = ["--json"];
-    if (model) {
+    // Resume existing thread if we have one and a projectId is set (session scoping)
+    const resuming = projectId && this.threadId;
+    const args: string[] = resuming
+      ? ["exec", "resume", this.threadId!, "--json", "--full-auto", "--skip-git-repo-check"]
+      : ["exec", "--json", "--full-auto", "--skip-git-repo-check"];
+    if (model && !resuming) {
       args.push("--model", model);
     }
     // Read prompt from stdin
@@ -162,8 +167,15 @@ export class CodexRunner implements Runner {
   }
 
   /**
-   * Parse JSONL output from Codex CLI.
-   * Looks for text content in response events.
+   * Parse JSONL output from `codex exec --json`.
+   *
+   * Event format (one JSON object per line):
+   *   { type: "thread.started", thread_id }
+   *   { type: "turn.started" }
+   *   { type: "item.started", item: { id, type, ... } }
+   *   { type: "item.completed", item: { id, type: "agent_message", text } }
+   *   { type: "item.completed", item: { id, type: "command_execution", command, exit_code } }
+   *   { type: "turn.completed", usage: { input_tokens, output_tokens, ... } }
    */
   private parseStreamLine(line: string, handlers: RunHandlers, requestId: string): void {
     if (!line.trim()) return;
@@ -171,25 +183,36 @@ export class CodexRunner implements Runner {
     try {
       const event = JSON.parse(line);
 
-      // Codex emits message events with content
-      if (event.type === "message" && event.role === "assistant") {
-        if (Array.isArray(event.content)) {
-          for (const block of event.content) {
-            if (block.type === "output_text" && block.text) {
-              handlers.onChunk(block.text, requestId);
-            } else if (block.type === "text" && block.text) {
-              handlers.onChunk(block.text, requestId);
-            }
-          }
-        } else if (typeof event.content === "string" && event.content) {
-          handlers.onChunk(event.content, requestId);
-        }
+      // Capture thread_id for session resumption
+      if (event.type === "thread.started" && event.thread_id) {
+        this.threadId = event.thread_id;
+        this.log.debug({ threadId: this.threadId, requestId }, "Captured Codex thread ID");
         return;
       }
 
-      // Response completed event
-      if (event.type === "response.completed" || event.type === "item.completed") {
-        // Content already streamed above
+      // Agent message — the actual text content we want to stream
+      if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
+        handlers.onChunk(event.item.text, requestId);
+        return;
+      }
+
+      // Reasoning trace — forward as thinking
+      if (event.type === "item.completed" && event.item?.type === "reasoning" && event.item.text) {
+        handlers.onChunk(event.item.text, requestId, true);
+        return;
+      }
+
+      // Turn failed — surface as error
+      if (event.type === "turn.failed") {
+        const msg = event.error?.message || event.message || "Codex turn failed";
+        handlers.onError(msg, requestId);
+        return;
+      }
+
+      // error event
+      if (event.type === "error") {
+        const msg = event.message || event.error?.message || "Codex error";
+        handlers.onError(msg, requestId);
         return;
       }
     } catch {

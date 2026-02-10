@@ -16,7 +16,9 @@ const DEFAULT_MAX_PAYLOAD = 1024 * 1024; // 1MB
 export type RunnerFactory = (log: Logger) => Runner;
 
 interface ConnectionState {
-  runner: Runner;
+  claudeRunner: Runner | null;
+  codexRunner: Runner | null;
+  activeRunner: Runner | null;
   isAlive: boolean;
   activeRequestId: string | null;
 }
@@ -26,6 +28,7 @@ export interface AgentWebSocketServerOptions {
   host: string;
   logger: Logger;
   claudePath?: string;
+  codexPath?: string;
   timeoutMs?: number;
   allowedOrigins?: string[];
   maxPayload?: number;
@@ -80,7 +83,8 @@ export class AgentWebSocketServer {
     }
 
     for (const [ws, state] of this.connections) {
-      state.runner.dispose();
+      state.claudeRunner?.dispose();
+      state.codexRunner?.dispose();
       ws.terminate();
     }
     this.connections.clear();
@@ -107,8 +111,7 @@ export class AgentWebSocketServer {
     const clientIp = req.socket.remoteAddress;
     this.log.info({ clientIp }, "Client connected");
 
-    const runner = this.createRunner();
-    const state: ConnectionState = { runner, isAlive: true, activeRequestId: null };
+    const state: ConnectionState = { claudeRunner: null, codexRunner: null, activeRunner: null, isAlive: true, activeRequestId: null };
     this.connections.set(ws, state);
 
     // Send connected message
@@ -129,7 +132,8 @@ export class AgentWebSocketServer {
 
     ws.on("close", () => {
       this.log.info({ clientIp }, "Client disconnected");
-      state.runner.dispose();
+      state.claudeRunner?.dispose();
+      state.codexRunner?.dispose();
       this.connections.delete(ws);
     });
 
@@ -170,21 +174,22 @@ export class AgentWebSocketServer {
 
     state.activeRequestId = message.requestId;
 
-    // Switch runner if provider changed
+    // Select runner for the requested provider (lazy-created, preserved across switches)
     if (message.provider === "codex") {
-      if (!(state.runner instanceof CodexRunner)) {
-        try { state.runner.dispose(); } catch { /* old runner already dead */ }
-        state.runner = new CodexRunner({
+      if (!state.codexRunner) {
+        state.codexRunner = new CodexRunner({
+          codexPath: this.options.codexPath,
           timeoutMs: this.options.timeoutMs,
           logger: this.log.child({ component: "codex-runner" }),
           sessionDir: this.options.sessionDir,
         });
       }
+      state.activeRunner = state.codexRunner;
     } else {
-      if (!(state.runner instanceof ClaudeRunner)) {
-        try { state.runner.dispose(); } catch { /* old runner already dead */ }
-        state.runner = this.createRunner();
+      if (!state.claudeRunner) {
+        state.claudeRunner = this.createRunner();
       }
+      state.activeRunner = state.claudeRunner;
     }
 
     const handlers: RunHandlers = {
@@ -213,14 +218,14 @@ export class AgentWebSocketServer {
       },
     };
 
-    state.runner.run(
+    state.activeRunner!.run(
       { prompt: message.prompt, model: message.model, systemPrompt: message.systemPrompt, projectId: message.projectId, requestId: message.requestId, thinkingTokens: message.thinkingTokens },
       handlers,
     );
   }
 
   private handleCancel(ws: WebSocket, state: ConnectionState): void {
-    state.runner.kill();
+    state.activeRunner?.kill();
     const requestId = state.activeRequestId;
     state.activeRequestId = null;
     this.log.info({ requestId }, "Request cancelled");
@@ -253,7 +258,8 @@ export class AgentWebSocketServer {
       for (const [ws, state] of this.connections) {
         if (!state.isAlive) {
           this.log.debug("Terminating dead connection");
-          state.runner.dispose();
+          state.claudeRunner?.dispose();
+          state.codexRunner?.dispose();
           this.connections.delete(ws);
           ws.terminate();
           continue;
@@ -264,7 +270,8 @@ export class AgentWebSocketServer {
           ws.ping();
         } catch {
           this.log.debug("Ping failed, terminating connection");
-          state.runner.dispose();
+          state.claudeRunner?.dispose();
+          state.codexRunner?.dispose();
           this.connections.delete(ws);
           ws.terminate();
         }

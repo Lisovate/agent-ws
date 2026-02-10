@@ -14,6 +14,7 @@ program
   .option("-p, --port <port>", "WebSocket server port", "9999")
   .option("-H, --host <host>", "WebSocket server host", "localhost")
   .option("-c, --claude-path <path>", "Path to Claude CLI", "claude")
+  .option("--codex-path <path>", "Path to Codex CLI", "codex")
   .option("-t, --timeout <seconds>", "Process timeout in seconds", "300")
   .option("--log-level <level>", "Log level (debug, info, warn, error)", "info")
   .option("--origins <origins>", "Comma-separated allowed origins")
@@ -21,6 +22,7 @@ program
     port: string;
     host: string;
     claudePath: string;
+    codexPath: string;
     timeout: string;
     logLevel: string;
     origins?: string;
@@ -43,6 +45,14 @@ program
       process.exit(1);
     }
     console.log(`Found Claude CLI: ${check.version}`);
+
+    // Check Codex CLI (optional — just warn if missing)
+    const codexCheck = checkClaudeCli(opts.codexPath);
+    if (codexCheck.available) {
+      console.log(`Found Codex CLI: ${codexCheck.version}`);
+    } else {
+      console.log("Codex CLI not found (codex provider will be unavailable)");
+    }
 
     const port = parseInt(opts.port, 10);
     if (isNaN(port) || port < 1 || port > 65535) {
@@ -73,6 +83,7 @@ program
       port,
       host: opts.host,
       claudePath: opts.claudePath,
+      codexPath: opts.codexPath,
       timeoutMs,
       logLevel: opts.logLevel,
       allowedOrigins,

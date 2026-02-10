@@ -1,6 +1,6 @@
 {
   "name": "agent-ws",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "WebSocket bridge for CLI AI agents — stream Claude and Codex CLI responses over WebSocket",
   "type": "module",
   "main": "dist/index.js",

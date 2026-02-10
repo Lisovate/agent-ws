@@ -5,6 +5,7 @@ export interface AgentWSOptions {
   port?: number;
   host?: string;
   claudePath?: string;
+  codexPath?: string;
   timeoutMs?: number;
   logLevel?: string;
   allowedOrigins?: string[];
@@ -25,6 +26,7 @@ export class AgentWS {
       host: options.host ?? "localhost",
       logger: this.log,
       claudePath: options.claudePath,
+      codexPath: options.codexPath,
       timeoutMs: options.timeoutMs,
       allowedOrigins: options.allowedOrigins,
       runnerFactory: options.runnerFactory,
