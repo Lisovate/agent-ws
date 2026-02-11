@@ -1,6 +1,7 @@
 export { AgentWS, type AgentWSOptions } from "./agent.js";
 export { AgentWebSocketServer, type AgentWebSocketServerOptions, type RunnerFactory } from "./server/websocket.js";
 export {
+  type PromptImage,
   type PromptMessage,
   type CancelMessage,
   type ClientMessage,

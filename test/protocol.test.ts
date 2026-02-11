@@ -1,4 +1,3 @@
-import { describe, it, expect } from "vitest";
 import {
   parseClientMessage,
   serializeMessage,
@@ -259,6 +258,133 @@ describe("parseClientMessage", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toBe(`Unknown message type: ${"x".repeat(50)}`);
+  });
+
+  it("parses valid images", () => {
+    const result = parseClientMessage(
+      JSON.stringify({
+        type: "prompt",
+        prompt: "describe this",
+        requestId: "r1",
+        images: [{ media_type: "image/png", data: "iVBOR" }],
+      })
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.message.type === "prompt" && result.message.images).toEqual([
+      { media_type: "image/png", data: "iVBOR" },
+    ]);
+  });
+
+  it("accepts all supported image types", () => {
+    for (const type of ["image/png", "image/jpeg", "image/gif", "image/webp"]) {
+      const result = parseClientMessage(
+        JSON.stringify({
+          type: "prompt",
+          prompt: "hi",
+          requestId: "r1",
+          images: [{ media_type: type, data: "AAAA" }],
+        })
+      );
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  it("rejects unsupported image media_type", () => {
+    const result = parseClientMessage(
+      JSON.stringify({
+        type: "prompt",
+        prompt: "hi",
+        requestId: "r1",
+        images: [{ media_type: "image/bmp", data: "AAAA" }],
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/Unsupported image type/);
+  });
+
+  it("rejects path-traversal media_type", () => {
+    const result = parseClientMessage(
+      JSON.stringify({
+        type: "prompt",
+        prompt: "hi",
+        requestId: "r1",
+        images: [{ media_type: "image/../../etc/passwd", data: "AAAA" }],
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/Unsupported image type/);
+  });
+
+  it("rejects too many images", () => {
+    const images = Array.from({ length: 5 }, () => ({
+      media_type: "image/png",
+      data: "AAAA",
+    }));
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hi", requestId: "r1", images })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/Too many images/);
+  });
+
+  it("rejects oversized image data", () => {
+    const result = parseClientMessage(
+      JSON.stringify({
+        type: "prompt",
+        prompt: "hi",
+        requestId: "r1",
+        images: [{ media_type: "image/png", data: "x".repeat(10 * 1024 * 1024 + 1) }],
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/Image exceeds maximum size/);
+  });
+
+  it("rejects image with missing fields", () => {
+    const result = parseClientMessage(
+      JSON.stringify({
+        type: "prompt",
+        prompt: "hi",
+        requestId: "r1",
+        images: [{ media_type: "image/png" }],
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/must have string media_type and data/);
+  });
+
+  it("rejects non-object image items", () => {
+    const result = parseClientMessage(
+      JSON.stringify({
+        type: "prompt",
+        prompt: "hi",
+        requestId: "r1",
+        images: ["not-an-object"],
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/Each image must be an object/);
+  });
+
+  it("ignores empty images array", () => {
+    const result = parseClientMessage(
+      JSON.stringify({
+        type: "prompt",
+        prompt: "hi",
+        requestId: "r1",
+        images: [],
+      })
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.message.type === "prompt" && result.message.images).toBeUndefined();
   });
 });
 

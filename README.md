@@ -60,6 +60,7 @@ await agent.start();
 -p, --port <port>            WebSocket server port (default: 9999)
 -H, --host <host>            WebSocket server host (default: localhost)
 -c, --claude-path <path>     Path to Claude CLI (default: claude)
+    --codex-path <path>      Path to Codex CLI (default: codex)
 -t, --timeout <seconds>      Process timeout in seconds (default: 300)
     --log-level <level>      Log level: debug, info, warn, error (default: info)
     --origins <origins>      Comma-separated allowed origins
@@ -97,6 +98,7 @@ Any WebSocket client can connect — browser frontends, backend services, script
 ```json
 { "type": "prompt", "prompt": "Build a login form", "requestId": "uuid", "model": "opus", "provider": "claude" }
 { "type": "prompt", "prompt": "...", "requestId": "uuid", "projectId": "my-app", "systemPrompt": "...", "thinkingTokens": 2048 }
+{ "type": "prompt", "prompt": "Describe this image", "requestId": "uuid", "images": [{ "media_type": "image/png", "data": "<base64>" }] }
 { "type": "cancel", "requestId": "uuid" }
 ```
 
@@ -109,6 +111,7 @@ Any WebSocket client can connect — browser frontends, backend services, script
 | `projectId` | no | Scopes CLI session by directory. Enables `--continue` for multi-turn. Alphanumeric, hyphens, underscores, dots only. |
 | `systemPrompt` | no | Appended as system prompt (max 64KB) |
 | `thinkingTokens` | no | Max thinking tokens. `0` disables thinking. Omit to let Claude decide. |
+| `images` | no | Array of `{ media_type, data }` objects. Up to 4 images, max 10MB base64 each. Supported types: `image/png`, `image/jpeg`, `image/gif`, `image/webp`. |
 
 ### Agent → Client
 
@@ -128,7 +131,7 @@ Chunks with `thinking: true` contain Claude's reasoning. Clients can display the
 - **Origin validation**: Optional `--origins` flag restricts allowed origins
 - **No credentials**: Never stores or transmits API keys
 - **Process isolation**: One CLI process per connection
-- **Message limits**: 1MB max WebSocket payload, 512KB max prompt size
+- **Message limits**: 50MB max WebSocket payload, 512KB max prompt, 10MB per image (4 max)
 - **Heartbeat**: Dead connections are cleaned up every 30 seconds
 
 ## Development

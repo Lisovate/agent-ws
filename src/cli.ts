@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { AgentWS } from "./agent.js";
-import { checkClaudeCli } from "./utils/claude-check.js";
+import { checkCli } from "./utils/claude-check.js";
 
 declare const PKG_VERSION: string;
 const VERSION = typeof PKG_VERSION !== "undefined" ? PKG_VERSION : "0.0.0-dev";
@@ -36,7 +36,7 @@ program
 `);
 
     // Check Claude CLI
-    const check = checkClaudeCli(opts.claudePath);
+    const check = checkCli(opts.claudePath);
     if (!check.available) {
       console.error(`Claude CLI not found at: ${opts.claudePath}`);
       console.error("Make sure Claude Code is installed and in your PATH.");
@@ -47,7 +47,7 @@ program
     console.log(`Found Claude CLI: ${check.version}`);
 
     // Check Codex CLI (optional — just warn if missing)
-    const codexCheck = checkClaudeCli(opts.codexPath);
+    const codexCheck = checkCli(opts.codexPath);
     if (codexCheck.available) {
       console.log(`Found Codex CLI: ${codexCheck.version}`);
     } else {

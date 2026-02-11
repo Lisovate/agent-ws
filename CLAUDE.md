@@ -49,6 +49,7 @@ npm run dev          # Run with --watch
 -p, --port <port>            WebSocket port (default: 9999)
 -H, --host <host>            Hostname (default: localhost)
 -c, --claude-path <path>     Path to Claude CLI (default: claude)
+    --codex-path <path>      Path to Codex CLI (default: codex)
 -t, --timeout <seconds>      Process timeout (default: 300)
     --log-level <level>      debug, info, warn, error (default: info)
     --origins <origins>      Comma-separated allowed origins
@@ -89,13 +90,14 @@ agent-ws/
 ### Client → Agent
 
 ```typescript
-{ type: "prompt", prompt: string, requestId: string, model?: string, provider?: "claude" | "codex", projectId?: string, systemPrompt?: string, thinkingTokens?: number }
+{ type: "prompt", prompt: string, requestId: string, model?: string, provider?: "claude" | "codex", projectId?: string, systemPrompt?: string, thinkingTokens?: number, images?: PromptImage[] }
 { type: "cancel", requestId?: string }
 ```
 
 - `projectId` scopes CLI session by CWD and enables `--continue` for multi-turn. Alphanumeric/hyphens/underscores/dots only, max 128 chars.
 - `systemPrompt` is passed via `--append-system-prompt` (max 64KB).
 - `thinkingTokens` controls thinking budget. `0` disables thinking. Omit to let Claude decide.
+- `images` is an optional array of `{ media_type: string, data: string }` (base64). Up to 4 images, max 10MB base64 each. Allowed types: `image/png`, `image/jpeg`, `image/gif`, `image/webp`. Claude uses `--input-format stream-json` with content blocks; Codex writes temp files and passes via `-i` flags.
 
 ### Agent → Client
 
@@ -122,7 +124,7 @@ Chunks with `thinking: true` contain Claude's reasoning (streamed when `thinking
 - Only listens on localhost by default
 - Optional origin validation (`--origins`)
 - No API keys stored or transmitted
-- 1MB max WebSocket payload, 512KB max prompt size
+- 50MB max WebSocket payload, 512KB max prompt, 10MB per image (4 max)
 - 30s heartbeat cleans up dead connections
 - 5min default process timeout
 
