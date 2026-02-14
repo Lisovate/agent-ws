@@ -11,7 +11,7 @@ import {
 import type { Logger } from "../utils/logger.js";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
-const DEFAULT_MAX_PAYLOAD = 1024 * 1024; // 1MB
+const DEFAULT_MAX_PAYLOAD = 50 * 1024 * 1024; // 50MB (images can be large)
 
 export type RunnerFactory = (log: Logger) => Runner;
 
@@ -32,7 +32,10 @@ export interface AgentWebSocketServerOptions {
   timeoutMs?: number;
   allowedOrigins?: string[];
   maxPayload?: number;
+  /** @deprecated Use claudeRunnerFactory instead */
   runnerFactory?: RunnerFactory;
+  claudeRunnerFactory?: RunnerFactory;
+  codexRunnerFactory?: RunnerFactory;
   agentName?: string;
   sessionDir?: string;
 }
@@ -177,17 +180,12 @@ export class AgentWebSocketServer {
     // Select runner for the requested provider (lazy-created, preserved across switches)
     if (message.provider === "codex") {
       if (!state.codexRunner) {
-        state.codexRunner = new CodexRunner({
-          codexPath: this.options.codexPath,
-          timeoutMs: this.options.timeoutMs,
-          logger: this.log.child({ component: "codex-runner" }),
-          sessionDir: this.options.sessionDir,
-        });
+        state.codexRunner = this.createCodexRunner();
       }
       state.activeRunner = state.codexRunner;
     } else {
       if (!state.claudeRunner) {
-        state.claudeRunner = this.createRunner();
+        state.claudeRunner = this.createClaudeRunner();
       }
       state.activeRunner = state.claudeRunner;
     }
@@ -219,15 +217,27 @@ export class AgentWebSocketServer {
     };
 
     state.activeRunner!.run(
-      { prompt: message.prompt, model: message.model, systemPrompt: message.systemPrompt, projectId: message.projectId, requestId: message.requestId, thinkingTokens: message.thinkingTokens },
+      {
+        prompt: message.prompt,
+        model: message.model,
+        systemPrompt: message.systemPrompt,
+        projectId: message.projectId,
+        requestId: message.requestId,
+        thinkingTokens: message.thinkingTokens,
+        images: message.images,
+      },
       handlers,
     );
   }
 
   private handleCancel(ws: WebSocket, state: ConnectionState): void {
-    state.activeRunner?.kill();
     const requestId = state.activeRequestId;
+    state.activeRunner?.kill();
     state.activeRequestId = null;
+
+    if (requestId) {
+      this.sendMessage(ws, { type: "error", message: "Request cancelled", requestId });
+    }
     this.log.info({ requestId }, "Request cancelled");
   }
 
@@ -239,18 +249,31 @@ export class AgentWebSocketServer {
     }
   }
 
-  private createRunner(): Runner {
-    if (this.options.runnerFactory) {
-      return this.options.runnerFactory(this.log);
+  private createClaudeRunner(): Runner {
+    const factory = this.options.claudeRunnerFactory ?? this.options.runnerFactory;
+    if (factory) {
+      return factory(this.log);
     }
 
-    const runnerOptions: ClaudeRunnerOptions = {
+    return new ClaudeRunner({
       claudePath: this.options.claudePath,
       timeoutMs: this.options.timeoutMs,
-      logger: this.log.child({ component: "runner" }),
+      logger: this.log.child({ component: "claude-runner" }),
       sessionDir: this.options.sessionDir,
-    };
-    return new ClaudeRunner(runnerOptions);
+    });
+  }
+
+  private createCodexRunner(): Runner {
+    if (this.options.codexRunnerFactory) {
+      return this.options.codexRunnerFactory(this.log);
+    }
+
+    return new CodexRunner({
+      codexPath: this.options.codexPath,
+      timeoutMs: this.options.timeoutMs,
+      logger: this.log.child({ component: "codex-runner" }),
+      sessionDir: this.options.sessionDir,
+    });
   }
 
   private startHeartbeat(): void {

@@ -2,12 +2,25 @@
 const MAX_PROMPT_BYTES = 512 * 1024;
 // Maximum system prompt size: 64KB
 const MAX_SYSTEM_PROMPT_BYTES = 64 * 1024;
+// Maximum images per message
+const MAX_IMAGES = 4;
+// Maximum single image size: 10MB base64
+const MAX_IMAGE_BASE64_BYTES = 10 * 1024 * 1024;
+// Allowed image MIME types
+const ALLOWED_IMAGE_TYPES = new Set([
+  "image/png", "image/jpeg", "image/gif", "image/webp",
+]);
 // Maximum projectId length
 const MAX_PROJECT_ID_LENGTH = 128;
 // Allowed projectId characters: alphanumeric, hyphens, underscores, dots
 const PROJECT_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
 
 // --- Client → Agent messages ---
+
+export interface PromptImage {
+  media_type: string;
+  data: string; // base64-encoded
+}
 
 export interface PromptMessage {
   type: "prompt";
@@ -18,6 +31,7 @@ export interface PromptMessage {
   requestId: string;
   provider?: "claude" | "codex";
   thinkingTokens?: number;
+  images?: PromptImage[];
 }
 
 export interface CancelMessage {
@@ -120,6 +134,32 @@ export function parseClientMessage(raw: string): ParseResult {
         }
       }
 
+      // Parse images (optional array of { media_type, data })
+      let parsedImages: PromptImage[] | undefined;
+      const rawImages = obj["images"];
+      if (Array.isArray(rawImages) && rawImages.length > 0) {
+        if (rawImages.length > MAX_IMAGES) {
+          return { ok: false, error: `Too many images (max ${MAX_IMAGES})` };
+        }
+        parsedImages = [];
+        for (const img of rawImages) {
+          if (typeof img !== "object" || img === null) {
+            return { ok: false, error: "Each image must be an object with media_type and data" };
+          }
+          const imgObj = img as Record<string, unknown>;
+          if (typeof imgObj["media_type"] !== "string" || typeof imgObj["data"] !== "string") {
+            return { ok: false, error: "Each image must have string media_type and data fields" };
+          }
+          if (!ALLOWED_IMAGE_TYPES.has(imgObj["media_type"])) {
+            return { ok: false, error: `Unsupported image type: ${String(imgObj["media_type"]).slice(0, 50)} (allowed: png, jpeg, gif, webp)` };
+          }
+          if (imgObj["data"].length > MAX_IMAGE_BASE64_BYTES) {
+            return { ok: false, error: `Image exceeds maximum size of ${MAX_IMAGE_BASE64_BYTES} bytes` };
+          }
+          parsedImages.push({ media_type: imgObj["media_type"], data: imgObj["data"] });
+        }
+      }
+
       return {
         ok: true,
         message: {
@@ -131,6 +171,7 @@ export function parseClientMessage(raw: string): ParseResult {
           requestId,
           provider: provider === "codex" ? "codex" : "claude",
           thinkingTokens: typeof thinkingTokens === "number" && thinkingTokens >= 0 ? thinkingTokens : undefined,
+          images: parsedImages,
         },
       };
     }

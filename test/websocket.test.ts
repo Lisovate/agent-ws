@@ -1,4 +1,3 @@
-import { describe, it, expect, afterEach } from "vitest";
 import { WebSocket } from "ws";
 import { AgentWebSocketServer } from "../src/server/websocket.js";
 import type { Runner, RunOptions, RunHandlers } from "../src/process/claude-runner.js";
@@ -57,19 +56,27 @@ describe("AgentWebSocketServer", () => {
     await new Promise((r) => setTimeout(r, 50));
   });
 
-  function createServer(): { runner: () => MockRunner } {
+  function createServer(): { claudeRunner: () => MockRunner; codexRunner: () => MockRunner } {
     port = nextPort++;
-    let currentRunner: MockRunner;
+    let currentClaudeRunner: MockRunner;
+    let currentCodexRunner: MockRunner;
     server = new AgentWebSocketServer({
       port,
       host: "localhost",
       logger: testLogger,
-      runnerFactory: () => {
-        currentRunner = new MockRunner();
-        return currentRunner;
+      claudeRunnerFactory: () => {
+        currentClaudeRunner = new MockRunner();
+        return currentClaudeRunner;
+      },
+      codexRunnerFactory: () => {
+        currentCodexRunner = new MockRunner();
+        return currentCodexRunner;
       },
     });
-    return { runner: () => currentRunner! };
+    return {
+      claudeRunner: () => currentClaudeRunner!,
+      codexRunner: () => currentCodexRunner!,
+    };
   }
 
   it("sends connected message on connection", async () => {
@@ -101,7 +108,7 @@ describe("AgentWebSocketServer", () => {
 
     await new Promise((r) => setTimeout(r, 50));
 
-    const runner = ctx.runner();
+    const runner = ctx.claudeRunner();
     expect(runner.lastOptions?.prompt).toBe("Hello Claude");
     expect(runner.lastOptions?.requestId).toBe("req-1");
 
@@ -118,7 +125,7 @@ describe("AgentWebSocketServer", () => {
     expect(complete).toEqual({ type: "complete", requestId: "req-1" });
   });
 
-  it("handles cancel message", async () => {
+  it("handles cancel message and sends error response", async () => {
     const ctx = createServer();
     await server.start();
 
@@ -132,10 +139,12 @@ describe("AgentWebSocketServer", () => {
     }));
     await new Promise((r) => setTimeout(r, 50));
 
+    const cancelP = nextMessage(client);
     client.send(JSON.stringify({ type: "cancel" }));
-    await new Promise((r) => setTimeout(r, 50));
+    const msg = await cancelP;
 
-    expect(ctx.runner().killCalled).toBe(true);
+    expect(ctx.claudeRunner().killCalled).toBe(true);
+    expect(msg).toEqual({ type: "error", message: "Request cancelled", requestId: "req-1" });
   });
 
   it("returns error for invalid JSON", async () => {
@@ -167,7 +176,7 @@ describe("AgentWebSocketServer", () => {
     }));
     await new Promise((r) => setTimeout(r, 50));
 
-    const runner = ctx.runner();
+    const runner = ctx.claudeRunner();
 
     client.close();
     await new Promise((r) => setTimeout(r, 100));
@@ -188,5 +197,53 @@ describe("AgentWebSocketServer", () => {
 
     expect(msg["type"]).toBe("error");
     expect(msg["message"]).toMatch(/Unknown message type/);
+  });
+
+  it("uses codex runner when provider is codex", async () => {
+    const ctx = createServer();
+    await server.start();
+
+    const { client: c } = await connect(port);
+    client = c;
+
+    client.send(JSON.stringify({
+      type: "prompt",
+      prompt: "Hello Codex",
+      requestId: "req-codex-1",
+      provider: "codex",
+    }));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const runner = ctx.codexRunner();
+    expect(runner.lastOptions?.prompt).toBe("Hello Codex");
+    expect(runner.lastOptions?.requestId).toBe("req-codex-1");
+
+    const chunkP = nextMessage(client);
+    runner.lastHandlers!.onChunk("Codex reply", "req-codex-1");
+    const chunk = await chunkP;
+    expect(chunk).toEqual({ type: "chunk", content: "Codex reply", requestId: "req-codex-1" });
+  });
+
+  it("passes images through to runner", async () => {
+    const ctx = createServer();
+    await server.start();
+
+    const { client: c } = await connect(port);
+    client = c;
+
+    const images = [{ media_type: "image/png", data: "iVBORbase64data" }];
+    client.send(JSON.stringify({
+      type: "prompt",
+      prompt: "describe this image",
+      requestId: "req-img-1",
+      images,
+    }));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const runner = ctx.claudeRunner();
+    expect(runner.lastOptions?.images).toEqual(images);
+    expect(runner.lastOptions?.prompt).toBe("describe this image");
   });
 });

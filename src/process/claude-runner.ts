@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import type { Logger } from "../utils/logger.js";
+import type { PromptImage } from "../server/protocol.js";
 
 export interface RunOptions {
   prompt: string;
@@ -12,6 +13,7 @@ export interface RunOptions {
   projectId?: string;
   requestId: string;
   thinkingTokens?: number;
+  images?: PromptImage[];
 }
 
 export interface RunHandlers {
@@ -66,7 +68,8 @@ export class ClaudeRunner implements Runner {
     // Kill any existing process first
     this.kill();
 
-    const { prompt, model, systemPrompt, projectId, requestId, thinkingTokens } = options;
+    const { prompt, model, systemPrompt, projectId, requestId, thinkingTokens, images } = options;
+    const hasImages = images && images.length > 0;
 
     const args = [
       "--print",
@@ -75,6 +78,10 @@ export class ClaudeRunner implements Runner {
       "--max-turns", "1",  // Single-turn text output, no agentic loops
       "--tools", "",       // Disable tool use — we only want generated text
     ];
+    // Use stream-json input when images are present (supports content blocks)
+    if (hasImages) {
+      args.push("--input-format", "stream-json");
+    }
     // Only resume session when a projectId is provided (scoped by CWD)
     if (projectId) {
       args.push("--continue");
@@ -133,7 +140,21 @@ export class ClaudeRunner implements Runner {
 
     // Write prompt to stdin and close it
     if (this.process.stdin) {
-      this.process.stdin.write(prompt);
+      if (hasImages) {
+        // stream-json input: structured message with image content blocks
+        const content: Array<Record<string, unknown>> = [];
+        for (const img of images!) {
+          content.push({
+            type: "image",
+            source: { type: "base64", media_type: img.media_type, data: img.data },
+          });
+        }
+        content.push({ type: "text", text: prompt });
+        const msg = JSON.stringify({ type: "user", message: { role: "user", content } });
+        this.process.stdin.write(msg + "\n");
+      } else {
+        this.process.stdin.write(prompt);
+      }
       this.process.stdin.end();
     }
 

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import type { Logger } from "../utils/logger.js";
@@ -45,13 +45,31 @@ export class CodexRunner implements Runner {
 
     this.kill();
 
-    const { prompt, model, systemPrompt, projectId, requestId } = options;
+    // Note: thinkingTokens is intentionally not used — Codex does not support thinking tokens
+    const { prompt, model, systemPrompt, projectId, requestId, images } = options;
 
     // Build the full prompt: prepend system prompt since Codex doesn't have
     // a dedicated --append-system-prompt flag
     let fullPrompt = prompt;
     if (systemPrompt) {
       fullPrompt = `${systemPrompt}\n\n---\n\n${prompt}`;
+    }
+
+    // Write images to temp files for the -i flag
+    const imagePaths: string[] = [];
+    if (images && images.length > 0) {
+      const imgDir = resolve(tmpdir(), "agent-ws-images");
+      mkdirSync(imgDir, { recursive: true });
+      // Sanitize requestId for safe use in filenames (strip anything that isn't alphanumeric/hyphen/underscore)
+      const safeId = requestId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+      for (let i = 0; i < images.length; i++) {
+        const img = images[i]!;
+        const rawExt = img.media_type.split("/")[1] || "png";
+        const ext = rawExt.replace(/[^a-zA-Z0-9]/g, "").slice(0, 10) || "png";
+        const imgPath = join(imgDir, `${safeId}-${i}.${ext}`);
+        writeFileSync(imgPath, Buffer.from(img.data, "base64"));
+        imagePaths.push(imgPath);
+      }
     }
 
     // Resume existing thread if we have one and a projectId is set (session scoping)
@@ -61,6 +79,10 @@ export class CodexRunner implements Runner {
       : ["exec", "--json", "--full-auto", "--skip-git-repo-check"];
     if (model && !resuming) {
       args.push("--model", model);
+    }
+    // Attach images via -i flags
+    for (const imgPath of imagePaths) {
+      args.push("-i", imgPath);
     }
     // Read prompt from stdin
     args.push("-");
@@ -79,6 +101,12 @@ export class CodexRunner implements Runner {
       mkdirSync(cwd, { recursive: true });
     }
 
+    const cleanupImages = () => {
+      for (const p of imagePaths) {
+        try { unlinkSync(p); } catch { /* already cleaned */ }
+      }
+    };
+
     const ALLOWED_ENV_KEYS = [
       "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
       "OPENAI_API_KEY", "NODE_PATH", "XDG_CONFIG_HOME",
@@ -95,6 +123,7 @@ export class CodexRunner implements Runner {
         env,
       });
     } catch (err) {
+      cleanupImages();
       const message = err instanceof Error ? err.message : "Failed to start Codex";
       this.log.error({ err, requestId }, "Failed to spawn Codex process");
       handlers.onError(message, requestId);
@@ -141,6 +170,7 @@ export class CodexRunner implements Runner {
 
     this.process.on("exit", (exitCode, signal) => {
       this.process = null;
+      cleanupImages();
 
       if (this.killed) {
         this.log.debug({ requestId }, "Codex process was killed");
@@ -161,6 +191,7 @@ export class CodexRunner implements Runner {
 
     this.process.on("error", (err) => {
       this.process = null;
+      cleanupImages();
       this.log.error({ err, requestId }, "Codex process error");
       finish(() => handlers.onError(err.message, requestId));
     });

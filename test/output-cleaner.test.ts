@@ -1,4 +1,3 @@
-import { describe, it, expect } from "vitest";
 import { cleanOutput } from "../src/process/output-cleaner.js";
 
 describe("cleanOutput", () => {

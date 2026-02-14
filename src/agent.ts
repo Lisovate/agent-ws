@@ -9,7 +9,10 @@ export interface AgentWSOptions {
   timeoutMs?: number;
   logLevel?: string;
   allowedOrigins?: string[];
+  /** @deprecated Use claudeRunnerFactory instead */
   runnerFactory?: RunnerFactory;
+  claudeRunnerFactory?: RunnerFactory;
+  codexRunnerFactory?: RunnerFactory;
   agentName?: string;
   sessionDir?: string;
 }
@@ -30,6 +33,8 @@ export class AgentWS {
       timeoutMs: options.timeoutMs,
       allowedOrigins: options.allowedOrigins,
       runnerFactory: options.runnerFactory,
+      claudeRunnerFactory: options.claudeRunnerFactory,
+      codexRunnerFactory: options.codexRunnerFactory,
       agentName: options.agentName,
       sessionDir: options.sessionDir,
     };

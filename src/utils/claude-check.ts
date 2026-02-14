@@ -1,14 +1,14 @@
 import { execFileSync } from "node:child_process";
 
-export interface ClaudeCheckResult {
+export interface CliCheckResult {
   available: boolean;
   version?: string;
   error?: string;
 }
 
-export function checkClaudeCli(claudePath: string = "claude"): ClaudeCheckResult {
+export function checkCli(cliPath: string = "claude"): CliCheckResult {
   try {
-    const output = execFileSync(claudePath, ["--version"], {
+    const output = execFileSync(cliPath, ["--version"], {
       timeout: 5000,
       stdio: "pipe",
       encoding: "utf-8",
