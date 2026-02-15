@@ -1,3 +1,7 @@
+[![npm version](https://img.shields.io/npm/v/agent-ws)](https://www.npmjs.com/package/agent-ws)
+[![npm downloads](https://img.shields.io/npm/dm/agent-ws)](https://www.npmjs.com/package/agent-ws)
+[![license](https://img.shields.io/npm/l/agent-ws)](https://www.npmjs.com/package/agent-ws)
+
 # agent-ws
 
 WebSocket bridge for CLI AI agents. Stream responses from Claude Code and Codex CLI over WebSocket. A dumb pipe: no prompt engineering, no credential handling, just transport.
