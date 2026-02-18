@@ -386,11 +386,65 @@ describe("parseClientMessage", () => {
     if (!result.ok) return;
     expect(result.message.type === "prompt" && result.message.images).toBeUndefined();
   });
+
+  it("rejects more than 100 files", () => {
+    const files = Array.from({ length: 101 }, (_, i) => ({
+      path: `file-${i}.txt`,
+      content: "x",
+    }));
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hi", requestId: "r1", files })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/Too many files/);
+  });
+
+  it("rejects files exceeding 50MB total", () => {
+    // Each file ~10MB, 6 files = 60MB > 50MB limit
+    const files = Array.from({ length: 6 }, (_, i) => ({
+      path: `file-${i}.txt`,
+      content: "x".repeat(10 * 1024 * 1024),
+    }));
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hi", requestId: "r1", files })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/Total file content exceeds maximum size/);
+  });
+
+  it("rejects file with empty path", () => {
+    const result = parseClientMessage(
+      JSON.stringify({
+        type: "prompt",
+        prompt: "hi",
+        requestId: "r1",
+        files: [{ path: "", content: "data" }],
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBe("File path must not be empty");
+  });
+
+  it("accepts files within limits", () => {
+    const files = [
+      { path: "src/App.tsx", content: "export default function App() {}" },
+      { path: "src/index.ts", content: "import App from './App';" },
+    ];
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hi", requestId: "r1", files })
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.message.type === "prompt" && result.message.files).toEqual(files);
+  });
 });
 
 describe("serializeMessage", () => {
   it("serializes a connected message", () => {
-    const msg: AgentMessage = { type: "connected", version: "1.0", agent: "agent-ws" };
+    const msg: AgentMessage = { type: "connected", version: "1.0", agent: "agent-ws", mode: "safe" };
     const serialized = serializeMessage(msg);
     expect(JSON.parse(serialized)).toEqual(msg);
   });
