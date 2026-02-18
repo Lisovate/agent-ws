@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const DEFAULT_MAX_PAYLOAD = 50 * 1024 * 1024; // 50MB (images can be large)
+const REJECTION_LOG_INTERVAL_MS = 10_000;
 
 export type RunnerFactory = (log: Logger) => Runner;
 
@@ -45,11 +46,14 @@ export interface AgentWebSocketServerOptions {
   agentName?: string;
   sessionDir?: string;
   mode?: PermissionMode;
+  authToken?: string;
 }
 
 export class AgentWebSocketServer {
   private wss: WebSocketServer | null = null;
   private heartbeatInterval: NodeJS.Timeout | null = null;
+  private rejectionFlushInterval: NodeJS.Timeout | null = null;
+  private readonly rejectionCounts = new Map<string, { reason: string; count: number }>();
   private readonly connections = new Map<WebSocket, ConnectionState>();
   private readonly log: Logger;
   private readonly options: AgentWebSocketServerOptions;
@@ -92,6 +96,8 @@ export class AgentWebSocketServer {
       this.heartbeatInterval = null;
     }
 
+    this.flushRejections();
+
     for (const [ws, state] of this.connections) {
       state.fileWatcher?.stop();
       state.claudeRunner?.dispose();
@@ -113,8 +119,19 @@ export class AgentWebSocketServer {
     if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
       const origin = req.headers.origin;
       if (!origin || !this.options.allowedOrigins.includes(origin)) {
-        this.log.warn({ origin: origin ?? "(none)" }, "Rejected connection: origin not in allowlist");
+        this.logRejection(origin ?? "(none)", "origin not in allowlist");
         ws.close(4003, "Origin not allowed");
+        return;
+      }
+    }
+
+    // Auth token check
+    if (this.options.authToken) {
+      const url = new URL(req.url ?? "", `http://${req.headers.host ?? "localhost"}`);
+      const token = url.searchParams.get("token");
+      if (token !== this.options.authToken) {
+        this.logRejection(req.headers.origin ?? "(none)", "invalid or missing auth token");
+        ws.close(4401, "Invalid or missing auth token");
         return;
       }
     }
@@ -354,6 +371,35 @@ export class AgentWebSocketServer {
       sessionDir: this.options.sessionDir,
       mode: this.options.mode,
     });
+  }
+
+  private logRejection(origin: string, reason: string): void {
+    const entry = this.rejectionCounts.get(origin);
+    if (entry) {
+      entry.count++;
+      return;
+    }
+    // First rejection for this origin — log immediately, start tracking
+    this.log.warn({ origin }, `Rejected connection: ${reason}`);
+    this.rejectionCounts.set(origin, { reason, count: 0 });
+
+    if (!this.rejectionFlushInterval) {
+      this.rejectionFlushInterval = setInterval(() => this.flushRejections(), REJECTION_LOG_INTERVAL_MS);
+    }
+  }
+
+  private flushRejections(): void {
+    for (const [origin, entry] of this.rejectionCounts) {
+      if (entry.count > 0) {
+        this.log.warn({ origin, count: entry.count }, `Rejected ${entry.count} more connection(s): ${entry.reason}`);
+      }
+    }
+    this.rejectionCounts.clear();
+
+    if (this.rejectionFlushInterval) {
+      clearInterval(this.rejectionFlushInterval);
+      this.rejectionFlushInterval = null;
+    }
   }
 
   private startHeartbeat(): void {

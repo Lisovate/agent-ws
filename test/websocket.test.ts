@@ -27,9 +27,10 @@ class MockRunner implements Runner {
 
 let nextPort = 19200;
 
-function connect(port: number): Promise<{ client: WebSocket; firstMsg: Record<string, unknown> }> {
+function connect(port: number, token?: string): Promise<{ client: WebSocket; firstMsg: Record<string, unknown> }> {
   return new Promise((resolve, reject) => {
-    const client = new WebSocket(`ws://localhost:${port}`);
+    const url = token ? `ws://localhost:${port}?token=${token}` : `ws://localhost:${port}`;
+    const client = new WebSocket(url);
     const timer = setTimeout(() => reject(new Error("connect timeout")), 3000);
     client.on("error", (err) => { clearTimeout(timer); reject(err); });
     client.on("message", (data) => {
@@ -60,7 +61,7 @@ describe("AgentWebSocketServer", () => {
     await new Promise((r) => setTimeout(r, 50));
   });
 
-  function createServer(opts?: { mode?: string }): { claudeRunner: () => MockRunner; codexRunner: () => MockRunner } {
+  function createServer(opts?: { mode?: string; authToken?: string }): { claudeRunner: () => MockRunner; codexRunner: () => MockRunner } {
     port = nextPort++;
     let currentClaudeRunner: MockRunner;
     let currentCodexRunner: MockRunner;
@@ -77,6 +78,7 @@ describe("AgentWebSocketServer", () => {
         return currentCodexRunner;
       },
       ...(opts?.mode ? { mode: opts.mode as "safe" | "agentic" | "unrestricted" } : {}),
+      ...(opts?.authToken ? { authToken: opts.authToken } : {}),
     });
     return {
       claudeRunner: () => currentClaudeRunner!,
@@ -462,6 +464,52 @@ describe("AgentWebSocketServer", () => {
       version: "1.0",
       agent: "agent-ws",
       mode: "unrestricted",
+    });
+  });
+
+  describe("auth token", () => {
+    const TEST_TOKEN = "a".repeat(64);
+
+    it("rejects connection without token when authToken is set", async () => {
+      createServer({ authToken: TEST_TOKEN });
+      await server.start();
+
+      const ws = new WebSocket(`ws://localhost:${port}`);
+      const code = await new Promise<number>((resolve) => {
+        ws.on("close", (code) => resolve(code));
+      });
+      expect(code).toBe(4401);
+    });
+
+    it("rejects connection with wrong token", async () => {
+      createServer({ authToken: TEST_TOKEN });
+      await server.start();
+
+      const ws = new WebSocket(`ws://localhost:${port}?token=wrong`);
+      const code = await new Promise<number>((resolve) => {
+        ws.on("close", (code) => resolve(code));
+      });
+      expect(code).toBe(4401);
+    });
+
+    it("accepts connection with correct token", async () => {
+      createServer({ authToken: TEST_TOKEN });
+      await server.start();
+
+      const { client: c, firstMsg } = await connect(port, TEST_TOKEN);
+      client = c;
+
+      expect(firstMsg.type).toBe("connected");
+    });
+
+    it("accepts connection without token when no authToken is set", async () => {
+      createServer();
+      await server.start();
+
+      const { client: c, firstMsg } = await connect(port);
+      client = c;
+
+      expect(firstMsg.type).toBe("connected");
     });
   });
 });

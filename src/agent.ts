@@ -17,6 +17,7 @@ export interface AgentWSOptions {
   agentName?: string;
   sessionDir?: string;
   mode?: PermissionMode;
+  authToken?: string;
 }
 
 export class AgentWS {
@@ -40,6 +41,7 @@ export class AgentWS {
       agentName: options.agentName,
       sessionDir: options.sessionDir,
       mode: options.mode,
+      authToken: options.authToken,
     };
 
     this.server = new AgentWebSocketServer(serverOptions);

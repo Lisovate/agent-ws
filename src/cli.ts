@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { randomBytes } from "node:crypto";
 import { AgentWS } from "./agent.js";
 import type { PermissionMode } from "./server/protocol.js";
 import { checkCli } from "./utils/claude-check.js";
@@ -19,6 +20,7 @@ program
   .option("-t, --timeout <seconds>", "Process timeout in seconds", "900")
   .option("-m, --mode <mode>", "Permission mode: safe, agentic, unrestricted (default: safe)", "safe")
   .option("--log-level <level>", "Log level (debug, info, warn, error)", "info")
+  .option("--no-auth", "Disable auth token requirement (allows any application to connect)")
   .option("--origins <origins>", "Comma-separated allowed origins")
   .action(async (opts: {
     port: string;
@@ -28,6 +30,7 @@ program
     timeout: string;
     mode: string;
     logLevel: string;
+    auth: boolean;
     origins?: string;
   }) => {
     // Banner
@@ -100,6 +103,8 @@ program
       console.warn("   Make sure this is intentional and your environment is secured.\n");
     }
 
+    const authToken = opts.auth ? randomBytes(32).toString("hex") : undefined;
+
     const agent = new AgentWS({
       port,
       host: opts.host,
@@ -109,6 +114,7 @@ program
       logLevel: opts.logLevel,
       allowedOrigins,
       mode,
+      authToken,
     });
 
     try {
@@ -122,8 +128,16 @@ program
     }
 
     console.log(`Mode: ${mode}`);
-    console.log(`agent-ws running on ws://${opts.host}:${port}`);
-    console.log("Waiting for connections...\n");
+
+    if (authToken) {
+      console.log(`Auth token: ${authToken}`);
+      console.log(`Connect:    ws://${opts.host}:${port}?token=${authToken}`);
+    } else {
+      console.warn("\n⚠  WARNING: Auth disabled — any application can connect.\n");
+      console.log(`Connect:    ws://${opts.host}:${port}`);
+    }
+
+    console.log("\nWaiting for connections...\n");
     console.log("Press Ctrl+C to stop\n");
 
     // Graceful shutdown
