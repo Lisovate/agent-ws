@@ -27,21 +27,26 @@ class MockRunner implements Runner {
 
 let nextPort = 19200;
 
-function connect(port: number): Promise<{ client: WebSocket; firstMsg: Record<string, unknown> }> {
+function connect(port: number, token?: string): Promise<{ client: WebSocket; firstMsg: Record<string, unknown> }> {
   return new Promise((resolve, reject) => {
-    const client = new WebSocket(`ws://localhost:${port}`);
-    client.on("error", reject);
+    const url = token ? `ws://localhost:${port}?token=${token}` : `ws://localhost:${port}`;
+    const client = new WebSocket(url);
+    const timer = setTimeout(() => reject(new Error("connect timeout")), 3000);
+    client.on("error", (err) => { clearTimeout(timer); reject(err); });
     client.on("message", (data) => {
+      clearTimeout(timer);
       resolve({ client, firstMsg: JSON.parse(data.toString()) });
     });
-    setTimeout(() => reject(new Error("connect timeout")), 3000);
   });
 }
 
 function nextMessage(ws: WebSocket): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    ws.once("message", (data) => resolve(JSON.parse(data.toString())));
-    setTimeout(() => reject(new Error("message timeout")), 3000);
+    const timer = setTimeout(() => reject(new Error("message timeout")), 3000);
+    ws.once("message", (data) => {
+      clearTimeout(timer);
+      resolve(JSON.parse(data.toString()));
+    });
   });
 }
 
@@ -56,7 +61,7 @@ describe("AgentWebSocketServer", () => {
     await new Promise((r) => setTimeout(r, 50));
   });
 
-  function createServer(): { claudeRunner: () => MockRunner; codexRunner: () => MockRunner } {
+  function createServer(opts?: { mode?: string; authToken?: string }): { claudeRunner: () => MockRunner; codexRunner: () => MockRunner } {
     port = nextPort++;
     let currentClaudeRunner: MockRunner;
     let currentCodexRunner: MockRunner;
@@ -72,6 +77,8 @@ describe("AgentWebSocketServer", () => {
         currentCodexRunner = new MockRunner();
         return currentCodexRunner;
       },
+      ...(opts?.mode ? { mode: opts.mode as "safe" | "agentic" | "unrestricted" } : {}),
+      ...(opts?.authToken ? { authToken: opts.authToken } : {}),
     });
     return {
       claudeRunner: () => currentClaudeRunner!,
@@ -79,8 +86,8 @@ describe("AgentWebSocketServer", () => {
     };
   }
 
-  it("sends connected message on connection", async () => {
-    const ctx = createServer();
+  it("sends connected message on connection with default safe mode", async () => {
+    createServer();
     await server.start();
 
     const { client: c, firstMsg } = await connect(port);
@@ -90,6 +97,7 @@ describe("AgentWebSocketServer", () => {
       type: "connected",
       version: "1.0",
       agent: "agent-ws",
+      mode: "safe",
     });
   });
 
@@ -245,5 +253,263 @@ describe("AgentWebSocketServer", () => {
     const runner = ctx.claudeRunner();
     expect(runner.lastOptions?.images).toEqual(images);
     expect(runner.lastOptions?.prompt).toBe("describe this image");
+  });
+
+  it("passes files through to runner", async () => {
+    const ctx = createServer();
+    await server.start();
+
+    const { client: c } = await connect(port);
+    client = c;
+
+    const files = [{ path: "src/App.tsx", content: "export default function App() {}" }];
+    client.send(JSON.stringify({
+      type: "prompt",
+      prompt: "add a button",
+      requestId: "req-files-1",
+      files,
+    }));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const runner = ctx.claudeRunner();
+    expect(runner.lastOptions?.files).toEqual(files);
+  });
+
+  it("forwards tool_event messages from runner", async () => {
+    const ctx = createServer();
+    await server.start();
+
+    const { client: c } = await connect(port);
+    client = c;
+
+    client.send(JSON.stringify({
+      type: "prompt",
+      prompt: "create files",
+      requestId: "req-tool-1",
+    }));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const runner = ctx.claudeRunner();
+
+    // Simulate tool event start
+    const toolP = nextMessage(client);
+    runner.lastHandlers!.onToolEvent!(
+      { event: "start", toolName: "Write", toolId: "tool-1" },
+      "req-tool-1",
+    );
+    const toolMsg = await toolP;
+    expect(toolMsg).toEqual({
+      type: "tool_event",
+      requestId: "req-tool-1",
+      event: "start",
+      toolName: "Write",
+      toolId: "tool-1",
+    });
+  });
+
+  it("forwards file_change messages from runner", async () => {
+    const ctx = createServer();
+    await server.start();
+
+    const { client: c } = await connect(port);
+    client = c;
+
+    client.send(JSON.stringify({
+      type: "prompt",
+      prompt: "create files",
+      requestId: "req-fc-1",
+    }));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const runner = ctx.claudeRunner();
+
+    // Simulate file change
+    const fcP = nextMessage(client);
+    runner.lastHandlers!.onFileChange!(
+      { path: "src/App.tsx", changeType: "create", content: "hello" },
+      "req-fc-1",
+    );
+    const fcMsg = await fcP;
+    expect(fcMsg).toEqual({
+      type: "file_change",
+      requestId: "req-fc-1",
+      path: "src/App.tsx",
+      changeType: "create",
+      content: "hello",
+    });
+  });
+
+  it("rejects second prompt while request is in progress", async () => {
+    const ctx = createServer();
+    await server.start();
+
+    const { client: c } = await connect(port);
+    client = c;
+
+    client.send(JSON.stringify({
+      type: "prompt",
+      prompt: "first",
+      requestId: "req-1",
+    }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Send second prompt before first completes
+    const errorP = nextMessage(client);
+    client.send(JSON.stringify({
+      type: "prompt",
+      prompt: "second",
+      requestId: "req-2",
+    }));
+    const msg = await errorP;
+
+    expect(msg).toEqual({
+      type: "error",
+      message: "Request already in progress",
+      requestId: "req-2",
+    });
+  });
+
+  it("forwards thinking chunks with thinking flag", async () => {
+    const ctx = createServer();
+    await server.start();
+
+    const { client: c } = await connect(port);
+    client = c;
+
+    client.send(JSON.stringify({
+      type: "prompt",
+      prompt: "think about this",
+      requestId: "req-think-1",
+    }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const runner = ctx.claudeRunner();
+
+    const thinkP = nextMessage(client);
+    runner.lastHandlers!.onChunk("reasoning...", "req-think-1", true);
+    const thinkMsg = await thinkP;
+
+    expect(thinkMsg).toEqual({
+      type: "chunk",
+      content: "reasoning...",
+      requestId: "req-think-1",
+      thinking: true,
+    });
+  });
+
+  it("allows new prompt after onError resets state", async () => {
+    const ctx = createServer();
+    await server.start();
+
+    const { client: c } = await connect(port);
+    client = c;
+
+    // Send first prompt
+    client.send(JSON.stringify({
+      type: "prompt",
+      prompt: "first",
+      requestId: "req-err-1",
+    }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Simulate error on first request
+    const errorP = nextMessage(client);
+    ctx.claudeRunner().lastHandlers!.onError("something broke", "req-err-1");
+    await errorP;
+
+    // Second prompt should succeed (not "Request already in progress")
+    client.send(JSON.stringify({
+      type: "prompt",
+      prompt: "second",
+      requestId: "req-err-2",
+    }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const runner = ctx.claudeRunner();
+    expect(runner.lastOptions?.requestId).toBe("req-err-2");
+  });
+
+  it("cancel with no active request does not crash", async () => {
+    createServer();
+    await server.start();
+
+    const { client: c } = await connect(port);
+    client = c;
+
+    // Send cancel without any prior prompt — should not throw or send error
+    client.send(JSON.stringify({ type: "cancel" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Connection should still be alive — verify by sending a valid prompt after
+    client.send(JSON.stringify({
+      type: "prompt",
+      prompt: "after cancel",
+      requestId: "req-ac-1",
+    }));
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
+  it("connected message includes specified mode", async () => {
+    createServer({ mode: "unrestricted" });
+    await server.start();
+
+    const { client: c, firstMsg } = await connect(port);
+    client = c;
+
+    expect(firstMsg).toEqual({
+      type: "connected",
+      version: "1.0",
+      agent: "agent-ws",
+      mode: "unrestricted",
+    });
+  });
+
+  describe("auth token", () => {
+    const TEST_TOKEN = "a".repeat(64);
+
+    it("rejects connection without token when authToken is set", async () => {
+      createServer({ authToken: TEST_TOKEN });
+      await server.start();
+
+      const ws = new WebSocket(`ws://localhost:${port}`);
+      const code = await new Promise<number>((resolve) => {
+        ws.on("close", (code) => resolve(code));
+      });
+      expect(code).toBe(4401);
+    });
+
+    it("rejects connection with wrong token", async () => {
+      createServer({ authToken: TEST_TOKEN });
+      await server.start();
+
+      const ws = new WebSocket(`ws://localhost:${port}?token=wrong`);
+      const code = await new Promise<number>((resolve) => {
+        ws.on("close", (code) => resolve(code));
+      });
+      expect(code).toBe(4401);
+    });
+
+    it("accepts connection with correct token", async () => {
+      createServer({ authToken: TEST_TOKEN });
+      await server.start();
+
+      const { client: c, firstMsg } = await connect(port, TEST_TOKEN);
+      client = c;
+
+      expect(firstMsg.type).toBe("connected");
+    });
+
+    it("accepts connection without token when no authToken is set", async () => {
+      createServer();
+      await server.start();
+
+      const { client: c, firstMsg } = await connect(port);
+      client = c;
+
+      expect(firstMsg.type).toBe("connected");
+    });
   });
 });
