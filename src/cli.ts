@@ -1,5 +1,7 @@
 import { Command } from "commander";
+import { randomBytes } from "node:crypto";
 import { AgentWS } from "./agent.js";
+import type { PermissionMode } from "./server/protocol.js";
 import { checkCli } from "./utils/claude-check.js";
 
 declare const PKG_VERSION: string;
@@ -15,8 +17,10 @@ program
   .option("-H, --host <host>", "WebSocket server host", "localhost")
   .option("-c, --claude-path <path>", "Path to Claude CLI", "claude")
   .option("--codex-path <path>", "Path to Codex CLI", "codex")
-  .option("-t, --timeout <seconds>", "Process timeout in seconds", "300")
+  .option("-t, --timeout <seconds>", "Process timeout in seconds", "900")
+  .option("-m, --mode <mode>", "Permission mode: safe, agentic, unrestricted (default: safe)", "safe")
   .option("--log-level <level>", "Log level (debug, info, warn, error)", "info")
+  .option("--no-auth", "Disable auth token requirement (allows any application to connect)")
   .option("--origins <origins>", "Comma-separated allowed origins")
   .action(async (opts: {
     port: string;
@@ -24,7 +28,9 @@ program
     claudePath: string;
     codexPath: string;
     timeout: string;
+    mode: string;
     logLevel: string;
+    auth: boolean;
     origins?: string;
   }) => {
     // Banner
@@ -54,6 +60,19 @@ program
       console.log("Codex CLI not found (codex provider will be unavailable)");
     }
 
+    // Validate mode
+    const validModes = ["safe", "agentic", "unrestricted"] as const;
+    if (!(validModes as readonly string[]).includes(opts.mode)) {
+      console.error(`Invalid mode: "${opts.mode}" (must be one of: ${validModes.join(", ")})`);
+      process.exit(1);
+    }
+    const mode = opts.mode as PermissionMode;
+
+    if (mode === "unrestricted") {
+      console.warn("\n⚠  WARNING: Running in unrestricted mode — Claude has full system access (shell, network, file system).");
+      console.warn("   Only use this in trusted, isolated environments.\n");
+    }
+
     const port = parseInt(opts.port, 10);
     if (isNaN(port) || port < 1 || port > 65535) {
       console.error(`Invalid port: ${opts.port} (must be 1–65535)`);
@@ -79,6 +98,13 @@ program
       }
     }
 
+    if (opts.host !== "localhost" && opts.host !== "127.0.0.1") {
+      console.warn(`\n⚠  WARNING: Listening on ${opts.host} — agent-ws will be accessible from the network.`);
+      console.warn("   Make sure this is intentional and your environment is secured.\n");
+    }
+
+    const authToken = opts.auth ? randomBytes(32).toString("hex") : undefined;
+
     const agent = new AgentWS({
       port,
       host: opts.host,
@@ -87,6 +113,8 @@ program
       timeoutMs,
       logLevel: opts.logLevel,
       allowedOrigins,
+      mode,
+      authToken,
     });
 
     try {
@@ -99,8 +127,17 @@ program
       process.exit(1);
     }
 
-    console.log(`agent-ws running on ws://${opts.host}:${port}`);
-    console.log("Waiting for connections...\n");
+    console.log(`Mode: ${mode}`);
+
+    if (authToken) {
+      console.log(`Auth token: ${authToken}`);
+      console.log(`Connect:    ws://${opts.host}:${port}?token=${authToken}`);
+    } else {
+      console.warn("\n⚠  WARNING: Auth disabled — any application can connect.\n");
+      console.log(`Connect:    ws://${opts.host}:${port}`);
+    }
+
+    console.log("\nWaiting for connections...\n");
     console.log("Press Ctrl+C to stop\n");
 
     // Graceful shutdown

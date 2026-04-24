@@ -1,19 +1,53 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { resolve, join, dirname, normalize } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import type { Logger } from "../utils/logger.js";
 import type { Runner, RunOptions, RunHandlers } from "./claude-runner.js";
+import type { PermissionMode } from "../server/protocol.js";
 
 export interface CodexRunnerOptions {
   codexPath?: string;
   timeoutMs?: number;
   logger: Logger;
   sessionDir?: string;
+  mode?: PermissionMode;
 }
 
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes for multi-turn work
+
+const ALLOWED_ENV_KEYS = [
+  "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
+  "OPENAI_API_KEY", "NODE_PATH", "XDG_CONFIG_HOME",
+];
+
+export function buildCodexArgs(mode: PermissionMode, options: {
+  resuming: boolean;
+  threadId?: string;
+  model?: string;
+  imagePaths: string[];
+}): string[] {
+  const args: string[] = options.resuming && options.threadId
+    ? ["exec", "resume", options.threadId, "--json", "--skip-git-repo-check"]
+    : ["exec", "--json", "--skip-git-repo-check"];
+
+  if (mode === "unrestricted") {
+    args.push("--sandbox", "danger-full-access", "--ask-for-approval", "never");
+  } else {
+    args.push("--full-auto");
+  }
+
+  if (options.model && !options.resuming) {
+    args.push("--model", options.model);
+  }
+  for (const imgPath of options.imagePaths) {
+    args.push("-i", imgPath);
+  }
+  args.push("-");
+
+  return args;
+}
 
 export class CodexRunner implements Runner {
   private process: ChildProcess | null = null;
@@ -25,12 +59,14 @@ export class CodexRunner implements Runner {
   private readonly timeoutMs: number;
   private readonly log: Logger;
   private readonly sessionDir: string;
+  private readonly mode: PermissionMode;
 
   constructor(options: CodexRunnerOptions) {
     this.codexPath = options.codexPath ?? "codex";
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.log = options.logger;
     this.sessionDir = options.sessionDir ?? "agent-ws-sessions";
+    this.mode = options.mode ?? "safe";
   }
 
   get isRunning(): boolean {
@@ -73,19 +109,13 @@ export class CodexRunner implements Runner {
     }
 
     // Resume existing thread if we have one and a projectId is set (session scoping)
-    const resuming = projectId && this.threadId;
-    const args: string[] = resuming
-      ? ["exec", "resume", this.threadId!, "--json", "--full-auto", "--skip-git-repo-check"]
-      : ["exec", "--json", "--full-auto", "--skip-git-repo-check"];
-    if (model && !resuming) {
-      args.push("--model", model);
-    }
-    // Attach images via -i flags
-    for (const imgPath of imagePaths) {
-      args.push("-i", imgPath);
-    }
-    // Read prompt from stdin
-    args.push("-");
+    const resuming = !!(projectId && this.threadId);
+    const args = buildCodexArgs(this.mode, {
+      resuming,
+      threadId: this.threadId ?? undefined,
+      model,
+      imagePaths,
+    });
 
     this.log.info({ requestId, model, promptLength: prompt.length }, "Spawning Codex process");
     this.killed = false;
@@ -101,16 +131,26 @@ export class CodexRunner implements Runner {
       mkdirSync(cwd, { recursive: true });
     }
 
+    // Write project files to session directory
+    if (cwd && options.files && options.files.length > 0) {
+      for (const file of options.files) {
+        const filePath = normalize(resolve(cwd, file.path));
+        if (!filePath.startsWith(cwd + "/") && filePath !== cwd) {
+          this.log.warn({ requestId, path: file.path }, "Skipping file outside session directory");
+          continue;
+        }
+        mkdirSync(dirname(filePath), { recursive: true });
+        writeFileSync(filePath, file.content, "utf-8");
+      }
+      this.log.debug({ requestId, fileCount: options.files.length }, "Wrote project files to session directory");
+    }
+
     const cleanupImages = () => {
       for (const p of imagePaths) {
         try { unlinkSync(p); } catch { /* already cleaned */ }
       }
     };
 
-    const ALLOWED_ENV_KEYS = [
-      "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
-      "OPENAI_API_KEY", "NODE_PATH", "XDG_CONFIG_HOME",
-    ];
     const env: Record<string, string> = {};
     for (const key of ALLOWED_ENV_KEYS) {
       if (process.env[key]) env[key] = process.env[key]!;
@@ -230,6 +270,31 @@ export class CodexRunner implements Runner {
       // Reasoning trace — forward as thinking
       if (event.type === "item.completed" && event.item?.type === "reasoning" && event.item.text) {
         handlers.onChunk(event.item.text, requestId, true);
+        return;
+      }
+
+      // File change event — forward to UI
+      if (event.type === "item.completed" && event.item?.type === "file_change") {
+        handlers.onFileChange?.({
+          path: event.item.path || event.item.filename || "",
+          changeType: event.item.change_type || "update",
+          content: event.item.content,
+        }, requestId);
+        return;
+      }
+
+      // Command execution — forward as tool event
+      if (event.type === "item.completed" && event.item?.type === "command_execution") {
+        handlers.onToolEvent?.({
+          event: "start",
+          toolName: "command",
+          toolId: event.item.id,
+          input: { command: event.item.command },
+        }, requestId);
+        handlers.onToolEvent?.({
+          event: "complete",
+          toolId: event.item.id,
+        }, requestId);
         return;
       }
 

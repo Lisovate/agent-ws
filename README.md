@@ -36,7 +36,9 @@ npm start
 # Start the WebSocket bridge
 agent-ws
 
-# Connect via WebSocket on ws://localhost:9999
+# The server prints a one-time auth token on startup:
+#   Auth token: <token>
+#   Connect:    ws://localhost:9999?token=<token>
 ```
 
 ## Library Usage (Node.js only)
@@ -63,14 +65,37 @@ await agent.start();
 ```
 -p, --port <port>            WebSocket server port (default: 9999)
 -H, --host <host>            WebSocket server host (default: localhost)
+-m, --mode <mode>            Permission mode: safe, agentic, unrestricted (default: safe)
 -c, --claude-path <path>     Path to Claude CLI (default: claude)
     --codex-path <path>      Path to Codex CLI (default: codex)
--t, --timeout <seconds>      Process timeout in seconds (default: 300)
+-t, --timeout <seconds>      Process timeout in seconds (default: 900)
+    --no-auth                Disable auth token (allows any application to connect)
     --log-level <level>      Log level: debug, info, warn, error (default: info)
     --origins <origins>      Comma-separated allowed origins
 -V, --version                Output version number
 -h, --help                   Display help
 ```
+
+## Permission Modes
+
+Control what the CLI agents can do with `--mode`:
+
+```bash
+agent-ws --mode safe          # Default — text generation only
+agent-ws --mode agentic       # File operations (read/write/edit)
+agent-ws --mode unrestricted  # Full system access — shell, network, everything
+```
+
+| Mode | Claude CLI flags | Codex CLI flags | Capabilities |
+|------|-----------------|-----------------|--------------|
+| `safe` | `--max-turns 1 --tools ""` | `--full-auto` | Text only, no tools |
+| `agentic` | `--permission-mode dontAsk --allowedTools "Read,Write,Edit,Glob,Grep"` | `--full-auto` | File ops only, no shell/network |
+| `unrestricted` | `--dangerously-skip-permissions` | `--sandbox danger-full-access --ask-for-approval never` | Everything |
+
+**Choosing a mode:**
+- Use `safe` when you only need text responses (Q&A, code generation without file access)
+- Use `agentic` when Claude needs to read/write project files but shouldn't run commands
+- Use `unrestricted` only in trusted, isolated environments where full system access is acceptable
 
 ## Architecture
 
@@ -116,11 +141,12 @@ Any WebSocket client can connect — browser frontends, backend services, script
 | `systemPrompt` | no | Appended as system prompt (max 64KB) |
 | `thinkingTokens` | no | Max thinking tokens. `0` disables thinking. Omit to let Claude decide. |
 | `images` | no | Array of `{ media_type, data }` objects. Up to 4 images, max 10MB base64 each. Supported types: `image/png`, `image/jpeg`, `image/gif`, `image/webp`. |
+| `files` | no | Array of `{ path, content }` objects. Up to 100 files, max 50MB total. Written to session directory for Claude to read/edit. |
 
 ### Agent → Client
 
 ```json
-{ "type": "connected", "version": "1.0", "agent": "agent-ws" }
+{ "type": "connected", "version": "1.0", "agent": "agent-ws", "mode": "safe" }
 { "type": "chunk", "content": "Here's a login form...", "requestId": "uuid" }
 { "type": "chunk", "content": "Let me think...", "requestId": "uuid", "thinking": true }
 { "type": "complete", "requestId": "uuid" }
@@ -129,14 +155,44 @@ Any WebSocket client can connect — browser frontends, backend services, script
 
 Chunks with `thinking: true` contain Claude's reasoning. Clients can display these as a thinking indicator or ignore them.
 
+## Authentication
+
+agent-ws generates a random auth token on every startup. Clients must include it as a query parameter:
+
+```
+ws://localhost:9999?token=<token>
+```
+
+This prevents other websites or applications from connecting to your local agent-ws instance. Without this, any page you visit could open a WebSocket to `localhost:9999` and execute commands on your machine (browsers don't enforce CORS on WebSocket connections).
+
+To disable authentication (e.g. for local development/testing):
+
+```bash
+agent-ws --no-auth
+```
+
+When using the library API, pass `authToken` in options:
+
+```typescript
+import { AgentWS } from "agent-ws";
+import { randomBytes } from "node:crypto";
+
+const token = randomBytes(32).toString("hex");
+const agent = new AgentWS({ authToken: token });
+await agent.start();
+```
+
 ## Security
 
+- **Auth token**: Random token generated on startup, required for all connections (disable with `--no-auth`)
+- **Safe by default**: `--mode safe` restricts to text-only responses with no tool access
 - **Local only**: Binds to `localhost` by default
 - **Origin validation**: Optional `--origins` flag restricts allowed origins
 - **No credentials**: Never stores or transmits API keys
 - **Process isolation**: One CLI process per connection
-- **Message limits**: 50MB max WebSocket payload, 512KB max prompt, 10MB per image (4 max)
+- **Message limits**: 50MB max WebSocket payload, 512KB max prompt, 10MB per image (4 max), 100 files (50MB total)
 - **Heartbeat**: Dead connections are cleaned up every 30 seconds
+- **Path traversal protection**: File paths are validated to stay within the session directory
 
 ## Development
 
@@ -161,6 +217,7 @@ src/
 ├── process/
 │   ├── claude-runner.ts   # Claude Code process spawn/kill/timeout
 │   ├── codex-runner.ts    # Codex process spawn/kill/timeout
+│   ├── file-watcher.ts    # Session directory file change detection
 │   └── output-cleaner.ts  # ANSI stripping via node:util
 └── utils/
     ├── logger.ts          # Pino logger factory

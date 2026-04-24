@@ -1,17 +1,23 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
-import { ClaudeRunner, type ClaudeRunnerOptions, type Runner, type RunHandlers } from "../process/claude-runner.js";
+import { ClaudeRunner, type Runner, type RunHandlers } from "../process/claude-runner.js";
 import { CodexRunner } from "../process/codex-runner.js";
+import { FileWatcher } from "../process/file-watcher.js";
 import {
   parseClientMessage,
   serializeMessage,
   type AgentMessage,
+  type PermissionMode,
   type PromptMessage,
 } from "./protocol.js";
 import type { Logger } from "../utils/logger.js";
+import { resolve } from "node:path";
+import { mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const DEFAULT_MAX_PAYLOAD = 50 * 1024 * 1024; // 50MB (images can be large)
+const REJECTION_LOG_INTERVAL_MS = 10_000;
 
 export type RunnerFactory = (log: Logger) => Runner;
 
@@ -21,6 +27,7 @@ interface ConnectionState {
   activeRunner: Runner | null;
   isAlive: boolean;
   activeRequestId: string | null;
+  fileWatcher: FileWatcher | null;
 }
 
 export interface AgentWebSocketServerOptions {
@@ -38,11 +45,15 @@ export interface AgentWebSocketServerOptions {
   codexRunnerFactory?: RunnerFactory;
   agentName?: string;
   sessionDir?: string;
+  mode?: PermissionMode;
+  authToken?: string;
 }
 
 export class AgentWebSocketServer {
   private wss: WebSocketServer | null = null;
   private heartbeatInterval: NodeJS.Timeout | null = null;
+  private rejectionFlushInterval: NodeJS.Timeout | null = null;
+  private readonly rejectionCounts = new Map<string, { reason: string; count: number }>();
   private readonly connections = new Map<WebSocket, ConnectionState>();
   private readonly log: Logger;
   private readonly options: AgentWebSocketServerOptions;
@@ -85,7 +96,10 @@ export class AgentWebSocketServer {
       this.heartbeatInterval = null;
     }
 
+    this.flushRejections();
+
     for (const [ws, state] of this.connections) {
+      state.fileWatcher?.stop();
       state.claudeRunner?.dispose();
       state.codexRunner?.dispose();
       ws.terminate();
@@ -105,8 +119,19 @@ export class AgentWebSocketServer {
     if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
       const origin = req.headers.origin;
       if (!origin || !this.options.allowedOrigins.includes(origin)) {
-        this.log.warn({ origin: origin ?? "(none)" }, "Rejected connection: origin not in allowlist");
+        this.logRejection(origin ?? "(none)", "origin not in allowlist");
         ws.close(4003, "Origin not allowed");
+        return;
+      }
+    }
+
+    // Auth token check
+    if (this.options.authToken) {
+      const url = new URL(req.url ?? "", `http://${req.headers.host ?? "localhost"}`);
+      const token = url.searchParams.get("token");
+      if (token !== this.options.authToken) {
+        this.logRejection(req.headers.origin ?? "(none)", "invalid or missing auth token");
+        ws.close(4401, "Invalid or missing auth token");
         return;
       }
     }
@@ -114,7 +139,7 @@ export class AgentWebSocketServer {
     const clientIp = req.socket.remoteAddress;
     this.log.info({ clientIp }, "Client connected");
 
-    const state: ConnectionState = { claudeRunner: null, codexRunner: null, activeRunner: null, isAlive: true, activeRequestId: null };
+    const state: ConnectionState = { claudeRunner: null, codexRunner: null, activeRunner: null, isAlive: true, activeRequestId: null, fileWatcher: null };
     this.connections.set(ws, state);
 
     // Send connected message
@@ -122,6 +147,7 @@ export class AgentWebSocketServer {
       type: "connected",
       version: "1.0",
       agent: this.options.agentName ?? "agent-ws",
+      mode: this.options.mode ?? "safe",
     });
 
     ws.on("pong", () => {
@@ -135,6 +161,7 @@ export class AgentWebSocketServer {
 
     ws.on("close", () => {
       this.log.info({ clientIp }, "Client disconnected");
+      state.fileWatcher?.stop();
       state.claudeRunner?.dispose();
       state.codexRunner?.dispose();
       this.connections.delete(ws);
@@ -167,6 +194,10 @@ export class AgentWebSocketServer {
 
   private handlePrompt(ws: WebSocket, state: ConnectionState, message: PromptMessage): void {
     if (state.activeRequestId !== null) {
+      this.log.warn(
+        { activeRequestId: state.activeRequestId, newRequestId: message.requestId },
+        "Rejected prompt: request already in progress"
+      );
       this.sendMessage(ws, {
         type: "error",
         message: "Request already in progress",
@@ -190,6 +221,14 @@ export class AgentWebSocketServer {
       state.activeRunner = state.claudeRunner;
     }
 
+    const flushAndStopFileWatcher = async () => {
+      if (state.fileWatcher) {
+        await state.fileWatcher.flush();
+        state.fileWatcher.stop();
+        state.fileWatcher = null;
+      }
+    };
+
     const handlers: RunHandlers = {
       onChunk: (content, requestId, thinking) => {
         try {
@@ -199,22 +238,75 @@ export class AgentWebSocketServer {
         }
       },
       onComplete: (requestId) => {
-        try {
+        // Flush pending file watcher events before sending complete
+        flushAndStopFileWatcher().then(() => {
           state.activeRequestId = null;
           this.sendMessage(ws, { type: "complete", requestId });
-        } catch (err) {
-          this.log.warn({ err, requestId }, "Error in onComplete handler");
-        }
+        }).catch((err) => {
+          this.log.warn({ err, requestId }, "Error flushing file watcher on complete");
+          state.activeRequestId = null;
+          this.sendMessage(ws, { type: "complete", requestId });
+        });
       },
       onError: (errorMessage, requestId) => {
-        try {
+        flushAndStopFileWatcher().then(() => {
           state.activeRequestId = null;
           this.sendMessage(ws, { type: "error", message: errorMessage, requestId });
+        }).catch((err) => {
+          this.log.warn({ err, requestId }, "Error flushing file watcher on error");
+          state.activeRequestId = null;
+          this.sendMessage(ws, { type: "error", message: errorMessage, requestId });
+        });
+      },
+      onToolEvent: (event, requestId) => {
+        try {
+          this.sendMessage(ws, {
+            type: "tool_event",
+            requestId,
+            event: event.event,
+            toolName: event.toolName,
+            toolId: event.toolId,
+            input: event.input,
+          });
         } catch (err) {
-          this.log.warn({ err, requestId }, "Error in onError handler");
+          this.log.warn({ err, requestId }, "Error in onToolEvent handler");
+        }
+      },
+      onFileChange: (change, requestId) => {
+        try {
+          this.sendMessage(ws, {
+            type: "file_change",
+            requestId,
+            path: change.path,
+            changeType: change.changeType,
+            content: change.content,
+          });
+        } catch (err) {
+          this.log.warn({ err, requestId }, "Error in onFileChange handler");
         }
       },
     };
+
+    // Start file watcher for the session directory when projectId is present
+    if (message.projectId) {
+      const sessionDir = this.options.sessionDir ?? "agent-ws-sessions";
+      const base = resolve(tmpdir(), sessionDir);
+      const cwd = resolve(base, message.projectId);
+
+      // Ensure directory exists before starting watcher (runner creates it later too,
+      // but we need it NOW so fs.watch doesn't fail silently on new projects)
+      mkdirSync(cwd, { recursive: true });
+
+      state.fileWatcher?.stop(); // stop any existing watcher
+      const watcher = new FileWatcher(cwd);
+      watcher.onChange((change) => {
+        handlers.onFileChange?.(change, message.requestId);
+      });
+      state.fileWatcher = watcher;
+      watcher.start().catch((err) => {
+        this.log.warn({ err }, "Failed to start file watcher");
+      });
+    }
 
     state.activeRunner!.run(
       {
@@ -225,6 +317,7 @@ export class AgentWebSocketServer {
         requestId: message.requestId,
         thinkingTokens: message.thinkingTokens,
         images: message.images,
+        files: message.files,
       },
       handlers,
     );
@@ -232,6 +325,8 @@ export class AgentWebSocketServer {
 
   private handleCancel(ws: WebSocket, state: ConnectionState): void {
     const requestId = state.activeRequestId;
+    state.fileWatcher?.stop(); // No flush on cancel — user wants it stopped now
+    state.fileWatcher = null;
     state.activeRunner?.kill();
     state.activeRequestId = null;
 
@@ -260,6 +355,7 @@ export class AgentWebSocketServer {
       timeoutMs: this.options.timeoutMs,
       logger: this.log.child({ component: "claude-runner" }),
       sessionDir: this.options.sessionDir,
+      mode: this.options.mode,
     });
   }
 
@@ -273,7 +369,37 @@ export class AgentWebSocketServer {
       timeoutMs: this.options.timeoutMs,
       logger: this.log.child({ component: "codex-runner" }),
       sessionDir: this.options.sessionDir,
+      mode: this.options.mode,
     });
+  }
+
+  private logRejection(origin: string, reason: string): void {
+    const entry = this.rejectionCounts.get(origin);
+    if (entry) {
+      entry.count++;
+      return;
+    }
+    // First rejection for this origin — log immediately, start tracking
+    this.log.warn({ origin }, `Rejected connection: ${reason}`);
+    this.rejectionCounts.set(origin, { reason, count: 0 });
+
+    if (!this.rejectionFlushInterval) {
+      this.rejectionFlushInterval = setInterval(() => this.flushRejections(), REJECTION_LOG_INTERVAL_MS);
+    }
+  }
+
+  private flushRejections(): void {
+    for (const [origin, entry] of this.rejectionCounts) {
+      if (entry.count > 0) {
+        this.log.warn({ origin, count: entry.count }, `Rejected ${entry.count} more connection(s): ${entry.reason}`);
+      }
+    }
+    this.rejectionCounts.clear();
+
+    if (this.rejectionFlushInterval) {
+      clearInterval(this.rejectionFlushInterval);
+      this.rejectionFlushInterval = null;
+    }
   }
 
   private startHeartbeat(): void {
@@ -281,6 +407,7 @@ export class AgentWebSocketServer {
       for (const [ws, state] of this.connections) {
         if (!state.isAlive) {
           this.log.debug("Terminating dead connection");
+          state.fileWatcher?.stop();
           state.claudeRunner?.dispose();
           state.codexRunner?.dispose();
           this.connections.delete(ws);
@@ -293,6 +420,7 @@ export class AgentWebSocketServer {
           ws.ping();
         } catch {
           this.log.debug("Ping failed, terminating connection");
+          state.fileWatcher?.stop();
           state.claudeRunner?.dispose();
           state.codexRunner?.dispose();
           this.connections.delete(ws);

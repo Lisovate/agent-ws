@@ -14,12 +14,23 @@ const ALLOWED_IMAGE_TYPES = new Set([
 const MAX_PROJECT_ID_LENGTH = 128;
 // Allowed projectId characters: alphanumeric, hyphens, underscores, dots
 const PROJECT_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
+// Maximum files per message
+export const MAX_FILES = 100;
+// Maximum total file content size: 50MB
+export const MAX_TOTAL_FILE_BYTES = 50 * 1024 * 1024;
+
+export type PermissionMode = "safe" | "agentic" | "unrestricted";
 
 // --- Client → Agent messages ---
 
 export interface PromptImage {
   media_type: string;
   data: string; // base64-encoded
+}
+
+export interface PromptFile {
+  path: string;
+  content: string;
 }
 
 export interface PromptMessage {
@@ -32,6 +43,7 @@ export interface PromptMessage {
   provider?: "claude" | "codex";
   thinkingTokens?: number;
   images?: PromptImage[];
+  files?: PromptFile[];
 }
 
 export interface CancelMessage {
@@ -47,6 +59,7 @@ export interface ConnectedMessage {
   type: "connected";
   version: string;
   agent: string;
+  mode: PermissionMode;
 }
 
 export interface ChunkMessage {
@@ -67,11 +80,30 @@ export interface ErrorMessage {
   requestId?: string;
 }
 
+export interface ToolEventMessage {
+  type: "tool_event";
+  requestId: string;
+  event: "start" | "complete";
+  toolName?: string;
+  toolId?: string;
+  input?: Record<string, unknown>;
+}
+
+export interface FileChangeMessage {
+  type: "file_change";
+  requestId: string;
+  path: string;
+  changeType: "create" | "update" | "delete";
+  content?: string;
+}
+
 export type AgentMessage =
   | ConnectedMessage
   | ChunkMessage
   | CompleteMessage
-  | ErrorMessage;
+  | ErrorMessage
+  | ToolEventMessage
+  | FileChangeMessage;
 
 // --- Parsing & validation ---
 
@@ -153,10 +185,38 @@ export function parseClientMessage(raw: string): ParseResult {
           if (!ALLOWED_IMAGE_TYPES.has(imgObj["media_type"])) {
             return { ok: false, error: `Unsupported image type: ${String(imgObj["media_type"]).slice(0, 50)} (allowed: png, jpeg, gif, webp)` };
           }
-          if (imgObj["data"].length > MAX_IMAGE_BASE64_BYTES) {
+          if (new TextEncoder().encode(imgObj["data"]).byteLength > MAX_IMAGE_BASE64_BYTES) {
             return { ok: false, error: `Image exceeds maximum size of ${MAX_IMAGE_BASE64_BYTES} bytes` };
           }
           parsedImages.push({ media_type: imgObj["media_type"], data: imgObj["data"] });
+        }
+      }
+
+      // Parse files (optional array of { path, content })
+      let parsedFiles: PromptFile[] | undefined;
+      const rawFiles = obj["files"];
+      if (Array.isArray(rawFiles) && rawFiles.length > 0) {
+        if (rawFiles.length > MAX_FILES) {
+          return { ok: false, error: `Too many files (max ${MAX_FILES})` };
+        }
+        parsedFiles = [];
+        let totalFileBytes = 0;
+        for (const f of rawFiles) {
+          if (typeof f !== "object" || f === null) {
+            return { ok: false, error: "Each file must be an object with path and content" };
+          }
+          const fObj = f as Record<string, unknown>;
+          if (typeof fObj["path"] !== "string" || typeof fObj["content"] !== "string") {
+            return { ok: false, error: "Each file must have string path and content fields" };
+          }
+          if (fObj["path"].length === 0) {
+            return { ok: false, error: "File path must not be empty" };
+          }
+          totalFileBytes += new TextEncoder().encode(fObj["content"]).byteLength;
+          if (totalFileBytes > MAX_TOTAL_FILE_BYTES) {
+            return { ok: false, error: `Total file content exceeds maximum size of ${MAX_TOTAL_FILE_BYTES} bytes` };
+          }
+          parsedFiles.push({ path: fObj["path"], content: fObj["content"] });
         }
       }
 
@@ -172,6 +232,7 @@ export function parseClientMessage(raw: string): ParseResult {
           provider: provider === "codex" ? "codex" : "claude",
           thinkingTokens: typeof thinkingTokens === "number" && thinkingTokens >= 0 ? thinkingTokens : undefined,
           images: parsedImages,
+          files: parsedFiles,
         },
       };
     }

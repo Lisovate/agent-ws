@@ -1,10 +1,23 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { resolve, dirname, normalize } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import type { Logger } from "../utils/logger.js";
-import type { PromptImage } from "../server/protocol.js";
+import type { PromptImage, PromptFile, PermissionMode } from "../server/protocol.js";
+
+export interface ToolEventData {
+  event: "start" | "complete";
+  toolName?: string;
+  toolId?: string;
+  input?: Record<string, unknown>;
+}
+
+export interface FileChangeData {
+  path: string;
+  changeType: "create" | "update" | "delete";
+  content?: string;
+}
 
 export interface RunOptions {
   prompt: string;
@@ -14,12 +27,15 @@ export interface RunOptions {
   requestId: string;
   thinkingTokens?: number;
   images?: PromptImage[];
+  files?: PromptFile[];
 }
 
 export interface RunHandlers {
   onChunk: (content: string, requestId: string, thinking?: boolean) => void;
   onComplete: (requestId: string) => void;
   onError: (message: string, requestId: string) => void;
+  onToolEvent?: (event: ToolEventData, requestId: string) => void;
+  onFileChange?: (change: FileChangeData, requestId: string) => void;
 }
 
 /** Interface for runner injection (testing) */
@@ -34,9 +50,56 @@ export interface ClaudeRunnerOptions {
   timeoutMs?: number;
   logger: Logger;
   sessionDir?: string;
+  mode?: PermissionMode;
 }
 
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes for multi-turn work
+
+const ALLOWED_ENV_KEYS = [
+  "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
+  "ANTHROPIC_API_KEY", "NODE_PATH", "XDG_CONFIG_HOME",
+];
+
+export function buildClaudeArgs(mode: PermissionMode, options: {
+  hasImages: boolean;
+  projectId?: string;
+  model?: string;
+  systemPrompt?: string;
+}): string[] {
+  const args = [
+    "--print",
+    "--verbose",
+    "--output-format", "stream-json",
+  ];
+
+  switch (mode) {
+    case "safe":
+      args.push("--max-turns", "1", "--tools", "");
+      break;
+    case "agentic":
+      args.push("--permission-mode", "dontAsk", "--allowedTools", "Read,Write,Edit,Glob,Grep");
+      break;
+    case "unrestricted":
+      args.push("--dangerously-skip-permissions");
+      break;
+  }
+
+  if (options.hasImages) {
+    args.push("--input-format", "stream-json");
+  }
+  if (options.projectId) {
+    args.push("--continue");
+  }
+  if (options.model) {
+    args.push("--model", options.model);
+  }
+  if (options.systemPrompt) {
+    args.push("--system-prompt", options.systemPrompt);
+  }
+  args.push("-");
+
+  return args;
+}
 
 export class ClaudeRunner implements Runner {
   private process: ChildProcess | null = null;
@@ -47,12 +110,14 @@ export class ClaudeRunner implements Runner {
   private readonly timeoutMs: number;
   private readonly log: Logger;
   private readonly sessionDir: string;
+  private readonly mode: PermissionMode;
 
   constructor(options: ClaudeRunnerOptions) {
     this.claudePath = options.claudePath ?? "claude";
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.log = options.logger;
     this.sessionDir = options.sessionDir ?? "agent-ws-sessions";
+    this.mode = options.mode ?? "safe";
   }
 
   get isRunning(): boolean {
@@ -68,32 +133,10 @@ export class ClaudeRunner implements Runner {
     // Kill any existing process first
     this.kill();
 
-    const { prompt, model, systemPrompt, projectId, requestId, thinkingTokens, images } = options;
-    const hasImages = images && images.length > 0;
+    const { prompt, model, systemPrompt, projectId, requestId, thinkingTokens, images, files } = options;
+    const hasImages = !!(images && images.length > 0);
 
-    const args = [
-      "--print",
-      "--verbose",
-      "--output-format", "stream-json",
-      "--max-turns", "1",  // Single-turn text output, no agentic loops
-      "--tools", "",       // Disable tool use — we only want generated text
-    ];
-    // Use stream-json input when images are present (supports content blocks)
-    if (hasImages) {
-      args.push("--input-format", "stream-json");
-    }
-    // Only resume session when a projectId is provided (scoped by CWD)
-    if (projectId) {
-      args.push("--continue");
-    }
-    if (model) {
-      args.push("--model", model);
-    }
-    if (systemPrompt) {
-      args.push("--append-system-prompt", systemPrompt);
-    }
-    // Prompt is piped via stdin (no arg length limits, no flag-parsing issues)
-    args.push("-");
+    const args = buildClaudeArgs(this.mode, { hasImages, projectId, model, systemPrompt });
 
     this.log.info({ requestId, model, promptLength: prompt.length }, "Spawning Claude process");
     this.killed = false;
@@ -111,11 +154,22 @@ export class ClaudeRunner implements Runner {
       mkdirSync(cwd, { recursive: true });
     }
 
+    // Write project files to session directory so Claude can read/edit them
+    if (cwd && files && files.length > 0) {
+      for (const file of files) {
+        const filePath = normalize(resolve(cwd, file.path));
+        // Validate path stays within cwd (prevent path traversal)
+        if (!filePath.startsWith(cwd + "/") && filePath !== cwd) {
+          this.log.warn({ requestId, path: file.path }, "Skipping file outside session directory");
+          continue;
+        }
+        mkdirSync(dirname(filePath), { recursive: true });
+        writeFileSync(filePath, file.content, "utf-8");
+      }
+      this.log.debug({ requestId, fileCount: files.length }, "Wrote project files to session directory");
+    }
+
     try {
-      const ALLOWED_ENV_KEYS = [
-        "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
-        "ANTHROPIC_API_KEY", "NODE_PATH", "XDG_CONFIG_HOME",
-      ];
       const env: Record<string, string> = {};
       if (thinkingTokens !== undefined) {
         env["MAX_THINKING_TOKENS"] = String(thinkingTokens);
@@ -227,8 +281,10 @@ export class ClaudeRunner implements Runner {
    * in these known patterns (in priority order):
    *
    * 1. Raw Anthropic API event: { type: "content_block_delta", delta: { type: "text_delta"|"thinking_delta", text|thinking } }
-   * 2. Wrapped stream event:    { type: "stream_event", event: { type: "content_block_delta", ... } }
-   * 3. Complete assistant msg:   { type: "assistant", message: { content: [{ type: "text"|"thinking", text|thinking }] } }
+   * 2. Raw content_block_start with tool_use → emit tool event start
+   * 3. Raw content_block_stop → emit tool event complete
+   * 4. Wrapped stream event:    { type: "stream_event", event: { ... } }
+   * 5. Complete assistant msg:   { type: "assistant", message: { content: [{ type: "text"|"thinking"|"tool_use", ... }] } }
    */
   private parseStreamLine(line: string, handlers: RunHandlers, requestId: string): void {
     if (!line.trim()) return;
@@ -246,7 +302,28 @@ export class ClaudeRunner implements Runner {
         return;
       }
 
-      // Pattern 2: Wrapped in stream_event
+      // Pattern 2: Raw content_block_start with tool_use
+      if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
+        handlers.onToolEvent?.({
+          event: "start",
+          toolName: event.content_block.name,
+          toolId: event.content_block.id,
+        }, requestId);
+        return;
+      }
+
+      // Pattern 3: Raw content_block_stop
+      if (event.type === "content_block_stop") {
+        // Only emit if we have a tool_use block ending (toolId from index tracking)
+        // The stop event doesn't carry the block type, so emit generically
+        handlers.onToolEvent?.({
+          event: "complete",
+          toolId: event.content_block?.id,
+        }, requestId);
+        return;
+      }
+
+      // Pattern 4: Wrapped in stream_event
       if (event.type === "stream_event" && event.event) {
         const inner = event.event;
         if (inner.type === "content_block_delta") {
@@ -255,17 +332,39 @@ export class ClaudeRunner implements Runner {
           } else if (inner.delta?.type === "thinking_delta" && inner.delta.thinking) {
             handlers.onChunk(inner.delta.thinking, requestId, true);
           }
+        } else if (inner.type === "content_block_start" && inner.content_block?.type === "tool_use") {
+          handlers.onToolEvent?.({
+            event: "start",
+            toolName: inner.content_block.name,
+            toolId: inner.content_block.id,
+          }, requestId);
+        } else if (inner.type === "content_block_stop") {
+          handlers.onToolEvent?.({
+            event: "complete",
+            toolId: inner.content_block?.id,
+          }, requestId);
         }
         return;
       }
 
-      // Pattern 3: Complete assistant message
+      // Pattern 5: Complete assistant message
       if (event.type === "assistant" && Array.isArray(event.message?.content)) {
         for (const block of event.message.content) {
           if (block.type === "text" && block.text) {
             handlers.onChunk(block.text, requestId);
           } else if (block.type === "thinking" && block.thinking) {
             handlers.onChunk(block.thinking, requestId, true);
+          } else if (block.type === "tool_use") {
+            handlers.onToolEvent?.({
+              event: "start",
+              toolName: block.name,
+              toolId: block.id,
+              input: block.input as Record<string, unknown> | undefined,
+            }, requestId);
+            handlers.onToolEvent?.({
+              event: "complete",
+              toolId: block.id,
+            }, requestId);
           }
         }
         return;

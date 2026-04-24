@@ -1,4 +1,5 @@
 import { AgentWebSocketServer, type AgentWebSocketServerOptions, type RunnerFactory } from "./server/websocket.js";
+import type { PermissionMode } from "./server/protocol.js";
 import { createLogger, type Logger } from "./utils/logger.js";
 
 export interface AgentWSOptions {
@@ -15,6 +16,8 @@ export interface AgentWSOptions {
   codexRunnerFactory?: RunnerFactory;
   agentName?: string;
   sessionDir?: string;
+  mode?: PermissionMode;
+  authToken?: string;
 }
 
 export class AgentWS {
@@ -37,6 +40,8 @@ export class AgentWS {
       codexRunnerFactory: options.codexRunnerFactory,
       agentName: options.agentName,
       sessionDir: options.sessionDir,
+      mode: options.mode,
+      authToken: options.authToken,
     };
 
     this.server = new AgentWebSocketServer(serverOptions);
