@@ -47,12 +47,15 @@ If you want to embed the WebSocket server into your own Node.js backend (e.g. Ex
 
 ```typescript
 import { AgentWS } from "agent-ws";
+import { randomBytes } from "node:crypto";
 
 const agent = new AgentWS({
   port: 9999,
   host: "localhost",
-  agentName: "my-app",       // Customise the agent identity in connected messages
-  sessionDir: "my-sessions", // Customise the temp directory name for sessions
+  mode: "agentic",                            // safe (default) | agentic | unrestricted
+  authToken: randomBytes(32).toString("hex"), // omit only for trusted environments
+  agentName: "my-app",                        // identity in connected messages
+  sessionDir: "my-sessions",                  // temp directory name for sessions
 });
 
 await agent.start();
@@ -68,7 +71,7 @@ await agent.start();
 -m, --mode <mode>            Permission mode: safe, agentic, unrestricted (default: safe)
 -c, --claude-path <path>     Path to Claude CLI (default: claude)
     --codex-path <path>      Path to Codex CLI (default: codex)
--t, --timeout <seconds>      Process timeout in seconds (default: 900)
+-t, --timeout <seconds>      Process timeout in seconds (default: 600)
     --no-auth                Disable auth token (allows any application to connect)
     --log-level <level>      Log level: debug, info, warn, error (default: info)
     --origins <origins>      Comma-separated allowed origins
@@ -89,13 +92,15 @@ agent-ws --mode unrestricted  # Full system access — shell, network, everythin
 | Mode | Claude CLI flags | Codex CLI flags | Capabilities |
 |------|-----------------|-----------------|--------------|
 | `safe` | `--max-turns 1 --tools ""` | `--full-auto` | Text only, no tools |
-| `agentic` | `--permission-mode dontAsk --allowedTools "Read,Write,Edit,Glob,Grep"` | `--full-auto` | File ops only, no shell/network |
+| `agentic` | `--permission-mode dontAsk --allowedTools "Read(**),Write(**),Edit(**),Glob(**),Grep(**)"` | `--full-auto` | File ops only, no shell/network |
 | `unrestricted` | `--dangerously-skip-permissions` | `--sandbox danger-full-access --ask-for-approval never` | Everything |
 
 **Choosing a mode:**
 - Use `safe` when you only need text responses (Q&A, code generation without file access)
 - Use `agentic` when Claude needs to read/write project files but shouldn't run commands
 - Use `unrestricted` only in trusted, isolated environments where full system access is acceptable
+
+In `agentic` and `unrestricted` modes, both runners inject sandbox instructions requiring all file operations to use relative paths. Claude also writes a `CLAUDE.md` to the session directory reinforcing this constraint.
 
 ## Architecture
 
@@ -134,12 +139,12 @@ Any WebSocket client can connect — browser frontends, backend services, script
 | Field | Required | Description |
 |-------|----------|-------------|
 | `prompt` | yes | The prompt text (max 512KB) |
-| `requestId` | yes | Unique request identifier |
+| `requestId` | yes | Unique request identifier (max 256 chars) |
 | `model` | no | Model name (e.g. `"sonnet"`, `"opus"`) |
-| `provider` | no | `"claude"` (default) or `"codex"` |
+| `provider` | no | `"claude"` (default) or `"codex"`. Unknown values are rejected. |
 | `projectId` | no | Scopes CLI session by directory. Enables `--continue` for multi-turn. Alphanumeric, hyphens, underscores, dots only. |
-| `systemPrompt` | no | Appended as system prompt (max 64KB) |
-| `thinkingTokens` | no | Max thinking tokens. `0` disables thinking. Omit to let Claude decide. |
+| `systemPrompt` | no | Appended as system prompt (max 64KB). Cached per-connection: if omitted on follow-up messages, the last value is reused. |
+| `thinkingTokens` | no | Max thinking tokens. `0` disables thinking. Omit to let Claude decide. Codex ignores this field. |
 | `images` | no | Array of `{ media_type, data }` objects. Up to 4 images, max 10MB base64 each. Supported types: `image/png`, `image/jpeg`, `image/gif`, `image/webp`. |
 | `files` | no | Array of `{ path, content }` objects. Up to 100 files, max 50MB total. Written to session directory for Claude to read/edit. |
 
@@ -149,11 +154,28 @@ Any WebSocket client can connect — browser frontends, backend services, script
 { "type": "connected", "version": "1.0", "agent": "agent-ws", "mode": "safe" }
 { "type": "chunk", "content": "Here's a login form...", "requestId": "uuid" }
 { "type": "chunk", "content": "Let me think...", "requestId": "uuid", "thinking": true }
+{ "type": "tool_event", "requestId": "uuid", "event": "start", "toolName": "Write", "toolId": "toolu_01" }
+{ "type": "tool_event", "requestId": "uuid", "event": "complete", "toolName": "Write", "toolId": "toolu_01", "input": { "file_path": "src/App.tsx", "content": "..." } }
+{ "type": "file_change", "requestId": "uuid", "path": "src/App.tsx", "changeType": "create", "content": "..." }
 { "type": "complete", "requestId": "uuid" }
 { "type": "error", "message": "Process timed out", "requestId": "uuid" }
 ```
 
 Chunks with `thinking: true` contain Claude's reasoning. Clients can display these as a thinking indicator or ignore them.
+
+`tool_event` and `file_change` are emitted in `agentic` and `unrestricted` modes when the CLI agent invokes file-modifying tools. Clients that don't care about live tool activity can ignore them. Edit tools fire two `file_change` events: a synchronous one (no content) when the edit starts, and an async one with post-edit content read from disk.
+
+Common error messages:
+
+| Message | When it fires |
+|---------|---------------|
+| `Invalid JSON` | Malformed message |
+| `Request already in progress` | Prompt sent while another is running |
+| `Process timed out` | CLI exceeded `--timeout` |
+| `Runner has been disposed` | Connection was cleaned up |
+| `<Agent> CLI exited with code N` | CLI process failed |
+| `Request cancelled` | Cancel message received |
+| `Server is shutting down` | Graceful shutdown in progress |
 
 ## Authentication
 
@@ -192,6 +214,8 @@ await agent.start();
 - **Process isolation**: One CLI process per connection
 - **Message limits**: 50MB max WebSocket payload, 512KB max prompt, 10MB per image (4 max), 100 files (50MB total)
 - **Heartbeat**: Dead connections are cleaned up every 30 seconds
+- **Rate limiting**: Max 10 concurrent connections per IP
+- **Graceful shutdown**: 5-second drain period for in-flight requests on SIGINT/SIGTERM
 - **Path traversal protection**: File paths are validated to stay within the session directory
 
 ## Development
@@ -215,10 +239,11 @@ src/
 │   ├── websocket.ts       # WebSocket server, heartbeat, per-connection state
 │   └── protocol.ts        # Message types, validation
 ├── process/
-│   ├── claude-runner.ts   # Claude Code process spawn/kill/timeout
-│   ├── codex-runner.ts    # Codex process spawn/kill/timeout
-│   ├── file-watcher.ts    # Session directory file change detection
-│   └── output-cleaner.ts  # ANSI stripping via node:util
+│   ├── base-runner.ts          # Abstract BaseRunner: spawn/kill/timeout scaffolding, file-write sandbox
+│   ├── claude-runner.ts        # ClaudeRunner (extends BaseRunner): wires the parser, post-edit reads
+│   ├── claude-stream-parser.ts # Stateless parser for Claude's stream-json NDJSON output
+│   ├── codex-runner.ts         # CodexRunner (extends BaseRunner): JSONL parsing, thread resumption
+│   └── output-cleaner.ts       # ANSI stripping via node:util
 └── utils/
     ├── logger.ts          # Pino logger factory
     └── claude-check.ts    # Claude CLI availability check

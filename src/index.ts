@@ -19,8 +19,8 @@ export {
   parseClientMessage,
   serializeMessage,
 } from "./server/protocol.js";
-export { ClaudeRunner, buildClaudeArgs, type ClaudeRunnerOptions, type Runner, type RunOptions, type RunHandlers, type ToolEventData, type FileChangeData } from "./process/claude-runner.js";
+export { type Runner, type RunOptions, type RunHandlers, type ToolEventData, type FileChangeData } from "./process/base-runner.js";
+export { ClaudeRunner, buildClaudeArgs, type ClaudeRunnerOptions } from "./process/claude-runner.js";
 export { CodexRunner, buildCodexArgs, type CodexRunnerOptions } from "./process/codex-runner.js";
-export { FileWatcher } from "./process/file-watcher.js";
 export { cleanOutput } from "./process/output-cleaner.js";
 export { createLogger, type Logger } from "./utils/logger.js";

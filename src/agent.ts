@@ -54,4 +54,8 @@ export class AgentWS {
   stop(): void {
     this.server.stop();
   }
+
+  async gracefulStop(): Promise<void> {
+    await this.server.gracefulStop();
+  }
 }

@@ -1,11 +1,14 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
-import { resolve, join, dirname, normalize } from "node:path";
+import type { ChildProcess } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createInterface } from "node:readline";
 import type { Logger } from "../utils/logger.js";
-import type { Runner, RunOptions, RunHandlers } from "./claude-runner.js";
 import type { PermissionMode } from "../server/protocol.js";
+import {
+  BaseRunner,
+  type RunOptions,
+  type RunHandlers,
+} from "./base-runner.js";
 
 export interface CodexRunnerOptions {
   codexPath?: string;
@@ -15,12 +18,17 @@ export interface CodexRunnerOptions {
   mode?: PermissionMode;
 }
 
-const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes for multi-turn work
-
 const ALLOWED_ENV_KEYS = [
   "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
   "OPENAI_API_KEY", "NODE_PATH", "XDG_CONFIG_HOME",
-];
+] as const;
+
+const SANDBOX_INSTRUCTIONS = [
+  "IMPORTANT: You are working in a sandboxed project directory.",
+  "All file operations MUST use relative paths within the current working directory.",
+  "NEVER use absolute paths starting with /.",
+  "Example: use 'src/App.tsx', NOT '/Users/.../src/App.tsx'.",
+].join(" ");
 
 export function buildCodexArgs(mode: PermissionMode, options: {
   resuming: boolean;
@@ -49,192 +57,95 @@ export function buildCodexArgs(mode: PermissionMode, options: {
   return args;
 }
 
-export class CodexRunner implements Runner {
-  private process: ChildProcess | null = null;
-  private timeout: NodeJS.Timeout | null = null;
-  private disposed = false;
-  private killed = false;
+export class CodexRunner extends BaseRunner {
   private threadId: string | null = null;
-  private readonly codexPath: string;
-  private readonly timeoutMs: number;
-  private readonly log: Logger;
-  private readonly sessionDir: string;
-  private readonly mode: PermissionMode;
+  private lastProjectId: string | undefined;
+  private imagePaths: string[] = [];
+  private imgDir: string | null = null;
 
   constructor(options: CodexRunnerOptions) {
-    this.codexPath = options.codexPath ?? "codex";
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.log = options.logger;
-    this.sessionDir = options.sessionDir ?? "agent-ws-sessions";
-    this.mode = options.mode ?? "safe";
+    super({
+      cliPath: options.codexPath ?? "codex",
+      defaultCliPath: "codex",
+      timeoutMs: options.timeoutMs,
+      logger: options.logger,
+      sessionDir: options.sessionDir,
+      mode: options.mode,
+      agentLabel: "Codex",
+      allowedEnvKeys: ALLOWED_ENV_KEYS,
+    });
   }
 
-  get isRunning(): boolean {
-    return this.process !== null;
+  protected onBeforeRun(options: RunOptions): void {
+    // Clear threadId when projectId changes (sessions are scoped per project)
+    if (options.projectId !== this.lastProjectId) {
+      this.threadId = null;
+      this.lastProjectId = options.projectId;
+    }
   }
 
-  run(options: RunOptions, handlers: RunHandlers): void {
-    if (this.disposed) {
-      handlers.onError("Runner has been disposed", options.requestId);
-      return;
-    }
-
-    this.kill();
-
-    // Note: thinkingTokens is intentionally not used — Codex does not support thinking tokens
-    const { prompt, model, systemPrompt, projectId, requestId, images } = options;
-
-    // Build the full prompt: prepend system prompt since Codex doesn't have
-    // a dedicated --append-system-prompt flag
-    let fullPrompt = prompt;
-    if (systemPrompt) {
-      fullPrompt = `${systemPrompt}\n\n---\n\n${prompt}`;
-    }
-
-    // Write images to temp files for the -i flag
-    const imagePaths: string[] = [];
+  protected onBeforeSpawn(options: RunOptions, _cwd: string | undefined): (() => void) | undefined {
+    // Write images to temp files for the -i flag (unique dir per request)
+    this.imagePaths = [];
+    this.imgDir = null;
+    const images = options.images;
     if (images && images.length > 0) {
-      const imgDir = resolve(tmpdir(), "agent-ws-images");
-      mkdirSync(imgDir, { recursive: true });
-      // Sanitize requestId for safe use in filenames (strip anything that isn't alphanumeric/hyphen/underscore)
-      const safeId = requestId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+      this.imgDir = mkdtempSync(join(tmpdir(), "agent-ws-img-"));
       for (let i = 0; i < images.length; i++) {
         const img = images[i]!;
         const rawExt = img.media_type.split("/")[1] || "png";
         const ext = rawExt.replace(/[^a-zA-Z0-9]/g, "").slice(0, 10) || "png";
-        const imgPath = join(imgDir, `${safeId}-${i}.${ext}`);
+        const imgPath = join(this.imgDir, `${i}.${ext}`);
         writeFileSync(imgPath, Buffer.from(img.data, "base64"));
-        imagePaths.push(imgPath);
+        this.imagePaths.push(imgPath);
       }
     }
 
-    // Resume existing thread if we have one and a projectId is set (session scoping)
-    const resuming = !!(projectId && this.threadId);
-    const args = buildCodexArgs(this.mode, {
+    const imgDir = this.imgDir;
+    return () => {
+      if (imgDir) {
+        try { rmSync(imgDir, { recursive: true, force: true }); } catch { /* already cleaned */ }
+      }
+    };
+  }
+
+  protected buildArgs(options: RunOptions): string[] {
+    const resuming = !!(options.projectId && this.threadId);
+    return buildCodexArgs(this.mode, {
       resuming,
       threadId: this.threadId ?? undefined,
-      model,
-      imagePaths,
+      model: options.model,
+      imagePaths: this.imagePaths,
     });
+  }
 
-    this.log.info({ requestId, model, promptLength: prompt.length }, "Spawning Codex process");
-    this.killed = false;
-
-    let cwd: string | undefined;
-    if (projectId) {
-      const base = resolve(tmpdir(), this.sessionDir);
-      cwd = resolve(base, projectId);
-      if (!cwd.startsWith(base + "/") && cwd !== base) {
-        handlers.onError("Invalid projectId", requestId);
-        return;
-      }
-      mkdirSync(cwd, { recursive: true });
+  protected writeStdin(proc: ChildProcess, options: RunOptions): void {
+    // Build the full prompt: prepend system prompt and sandbox instructions
+    // since Codex doesn't have a dedicated --append-system-prompt flag
+    const parts: string[] = [];
+    if (this.mode === "agentic" || this.mode === "unrestricted") {
+      parts.push(SANDBOX_INSTRUCTIONS);
     }
-
-    // Write project files to session directory
-    if (cwd && options.files && options.files.length > 0) {
-      for (const file of options.files) {
-        const filePath = normalize(resolve(cwd, file.path));
-        if (!filePath.startsWith(cwd + "/") && filePath !== cwd) {
-          this.log.warn({ requestId, path: file.path }, "Skipping file outside session directory");
-          continue;
-        }
-        mkdirSync(dirname(filePath), { recursive: true });
-        writeFileSync(filePath, file.content, "utf-8");
-      }
-      this.log.debug({ requestId, fileCount: options.files.length }, "Wrote project files to session directory");
+    if (this.lastSystemPrompt) {
+      parts.push(this.lastSystemPrompt);
     }
+    let fullPrompt = options.prompt;
+    if (parts.length > 0) {
+      fullPrompt = `${parts.join("\n\n")}\n\n---\n\n${options.prompt}`;
+    }
+    proc.stdin!.write(fullPrompt);
+  }
 
-    const cleanupImages = () => {
-      for (const p of imagePaths) {
-        try { unlinkSync(p); } catch { /* already cleaned */ }
-      }
+  protected getStreamHandlers(
+    handlers: RunHandlers,
+    finish: (cb: () => void) => void,
+  ): RunHandlers {
+    // Wrap onError so stream-level errors (turn.failed, error) go through
+    // the finish guard — prevents double error when exit also fires
+    return {
+      ...handlers,
+      onError: (msg, rid) => finish(() => handlers.onError(msg, rid)),
     };
-
-    const env: Record<string, string> = {};
-    for (const key of ALLOWED_ENV_KEYS) {
-      if (process.env[key]) env[key] = process.env[key]!;
-    }
-
-    try {
-      this.process = spawn(this.codexPath, args, {
-        stdio: ["pipe", "pipe", "pipe"],
-        cwd,
-        env,
-      });
-    } catch (err) {
-      cleanupImages();
-      const message = err instanceof Error ? err.message : "Failed to start Codex";
-      this.log.error({ err, requestId }, "Failed to spawn Codex process");
-      handlers.onError(message, requestId);
-      return;
-    }
-
-    this.log.debug({ pid: this.process.pid, requestId }, "Codex process spawned");
-
-    if (this.process.stdin) {
-      this.process.stdin.write(fullPrompt);
-      this.process.stdin.end();
-    }
-
-    // Guard against double handler invocation (e.g. error + exit both firing)
-    let handlersDone = false;
-    const finish = (cb: () => void) => {
-      if (handlersDone) return;
-      handlersDone = true;
-      this.clearTimeout();
-      cb();
-    };
-
-    this.timeout = setTimeout(() => {
-      this.log.warn({ requestId }, "Codex process timed out");
-      this.kill();
-      finish(() => handlers.onError("Process timed out", requestId));
-    }, this.timeoutMs);
-
-    if (this.process.stdout) {
-      const rl = createInterface({ input: this.process.stdout });
-      rl.on("line", (line) => {
-        this.parseStreamLine(line, handlers, requestId);
-      });
-    }
-
-    if (this.process.stderr) {
-      const stderrRl = createInterface({ input: this.process.stderr });
-      stderrRl.on("line", (line) => {
-        if (line.trim()) {
-          this.log.warn({ requestId, stderr: line }, "Codex stderr");
-        }
-      });
-    }
-
-    this.process.on("exit", (exitCode, signal) => {
-      this.process = null;
-      cleanupImages();
-
-      if (this.killed) {
-        this.log.debug({ requestId }, "Codex process was killed");
-        return;
-      }
-
-      if (exitCode === 0) {
-        this.log.info({ requestId }, "Codex process completed successfully");
-        finish(() => handlers.onComplete(requestId));
-      } else {
-        const reason = exitCode !== null
-          ? `Codex CLI exited with code ${exitCode}`
-          : `Codex CLI killed by signal ${signal ?? "unknown"}`;
-        this.log.warn({ requestId, exitCode, signal }, reason);
-        finish(() => handlers.onError(reason, requestId));
-      }
-    });
-
-    this.process.on("error", (err) => {
-      this.process = null;
-      cleanupImages();
-      this.log.error({ err, requestId }, "Codex process error");
-      finish(() => handlers.onError(err.message, requestId));
-    });
   }
 
   /**
@@ -248,7 +159,7 @@ export class CodexRunner implements Runner {
    *   { type: "item.completed", item: { id, type: "command_execution", command, exit_code } }
    *   { type: "turn.completed", usage: { input_tokens, output_tokens, ... } }
    */
-  private parseStreamLine(line: string, handlers: RunHandlers, requestId: string): void {
+  protected parseStreamLine(line: string, handlers: RunHandlers, requestId: string): void {
     if (!line.trim()) return;
 
     try {
@@ -275,8 +186,12 @@ export class CodexRunner implements Runner {
 
       // File change event — forward to UI
       if (event.type === "item.completed" && event.item?.type === "file_change") {
+        const filePath = event.item.path || event.item.filename || "";
+        if (!filePath) {
+          this.log.warn({ requestId }, "Codex file_change event missing path and filename");
+        }
         handlers.onFileChange?.({
-          path: event.item.path || event.item.filename || "",
+          path: filePath,
           changeType: event.item.change_type || "update",
           content: event.item.content,
         }, requestId);
@@ -313,32 +228,6 @@ export class CodexRunner implements Runner {
       }
     } catch {
       // Non-JSON line, skip
-    }
-  }
-
-  kill(): void {
-    this.clearTimeout();
-    if (this.process) {
-      this.log.debug({ pid: this.process.pid }, "Killing Codex process");
-      this.killed = true;
-      try {
-        this.process.kill();
-      } catch {
-        // Process may already be dead
-      }
-      this.process = null;
-    }
-  }
-
-  dispose(): void {
-    this.disposed = true;
-    this.kill();
-  }
-
-  private clearTimeout(): void {
-    if (this.timeout) {
-      clearTimeout(this.timeout);
-      this.timeout = null;
     }
   }
 }

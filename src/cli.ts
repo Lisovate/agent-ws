@@ -17,7 +17,7 @@ program
   .option("-H, --host <host>", "WebSocket server host", "localhost")
   .option("-c, --claude-path <path>", "Path to Claude CLI", "claude")
   .option("--codex-path <path>", "Path to Codex CLI", "codex")
-  .option("-t, --timeout <seconds>", "Process timeout in seconds", "900")
+  .option("-t, --timeout <seconds>", "Process timeout in seconds", "600")
   .option("-m, --mode <mode>", "Permission mode: safe, agentic, unrestricted (default: safe)", "safe")
   .option("--log-level <level>", "Log level (debug, info, warn, error)", "info")
   .option("--no-auth", "Disable auth token requirement (allows any application to connect)")
@@ -140,15 +140,19 @@ program
     console.log("\nWaiting for connections...\n");
     console.log("Press Ctrl+C to stop\n");
 
-    // Graceful shutdown
-    const shutdown = () => {
-      agent.stop();
-      console.log("\nagent-ws stopped");
+    // Graceful shutdown — wait up to 5s for in-flight requests
+    let shuttingDown = false;
+    const shutdown = async () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      console.log("\nShutting down gracefully (waiting up to 5s for in-flight requests)...");
+      await agent.gracefulStop();
+      console.log("agent-ws stopped");
       process.exit(0);
     };
 
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+    process.on("SIGINT", () => { shutdown(); });
+    process.on("SIGTERM", () => { shutdown(); });
   });
 
 program.parse();

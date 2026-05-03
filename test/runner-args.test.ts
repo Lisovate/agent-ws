@@ -14,12 +14,12 @@ describe("buildClaudeArgs", () => {
     expect(args).not.toContain("--permission-mode");
   });
 
-  it("agentic mode produces --permission-mode dontAsk with file tools", () => {
+  it("agentic mode produces --permission-mode dontAsk with sandboxed file tools", () => {
     const args = buildClaudeArgs("agentic", base);
     expect(args).toContain("--permission-mode");
     expect(args[args.indexOf("--permission-mode") + 1]).toBe("dontAsk");
     expect(args).toContain("--allowedTools");
-    expect(args[args.indexOf("--allowedTools") + 1]).toBe("Read,Write,Edit,Glob,Grep");
+    expect(args[args.indexOf("--allowedTools") + 1]).toBe("Read(**),Write(**),Edit(**),Glob(**),Grep(**)");
     expect(args).not.toContain("--max-turns");
     expect(args).not.toContain("--dangerously-skip-permissions");
   });
@@ -73,10 +73,32 @@ describe("buildClaudeArgs", () => {
     expect(args[args.indexOf("--model") + 1]).toBe("opus");
   });
 
-  it("includes --system-prompt when systemPrompt is set", () => {
+  it("appends user systemPrompt via --append-system-prompt", () => {
     const args = buildClaudeArgs("safe", { ...base, systemPrompt: "Be helpful" });
-    expect(args).toContain("--system-prompt");
-    expect(args[args.indexOf("--system-prompt") + 1]).toBe("Be helpful");
+    // Find the --append-system-prompt that carries the user prompt (sandbox is only added in non-safe modes)
+    const idx = args.indexOf("--append-system-prompt");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe("Be helpful");
+  });
+
+  it("includes --append-system-prompt with sandbox instructions for agentic mode", () => {
+    const args = buildClaudeArgs("agentic", base);
+    expect(args).toContain("--append-system-prompt");
+    const prompt = args[args.indexOf("--append-system-prompt") + 1]!;
+    expect(prompt).toContain("relative paths");
+    expect(prompt).toContain("NEVER use absolute paths");
+  });
+
+  it("includes --append-system-prompt with sandbox instructions for unrestricted mode", () => {
+    const args = buildClaudeArgs("unrestricted", base);
+    expect(args).toContain("--append-system-prompt");
+    const prompt = args[args.indexOf("--append-system-prompt") + 1]!;
+    expect(prompt).toContain("relative paths");
+  });
+
+  it("excludes --append-system-prompt for safe mode", () => {
+    const args = buildClaudeArgs("safe", base);
+    expect(args).not.toContain("--append-system-prompt");
   });
 });
 
@@ -131,6 +153,14 @@ describe("buildCodexArgs", () => {
   it("excludes model when resuming", () => {
     const args = buildCodexArgs("safe", { resuming: true, threadId: "t1", model: "gpt-4", imagePaths: [] });
     expect(args).not.toContain("--model");
+  });
+
+  it("falls back to non-resume path when resuming without threadId", () => {
+    const args = buildCodexArgs("safe", { resuming: true, threadId: undefined, imagePaths: [] });
+    // Should not contain "resume" — falls back to plain exec
+    expect(args[1]).not.toBe("resume");
+    expect(args[0]).toBe("exec");
+    expect(args).toContain("--json");
   });
 
   it("includes image paths via -i flags", () => {

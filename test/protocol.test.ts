@@ -133,6 +133,36 @@ describe("parseClientMessage", () => {
     expect(result.error).toMatch(/exceeds maximum size/);
   });
 
+  it("rejects oversized requestId", () => {
+    const longId = "r".repeat(300);
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hello", requestId: longId })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/requestId exceeds maximum length/);
+  });
+
+  it("accepts requestId at exactly 256 chars", () => {
+    const exactId = "r".repeat(256);
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hello", requestId: exactId })
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.message.type === "prompt" && result.message.requestId).toBe(exactId);
+  });
+
+  it("rejects requestId at 257 chars", () => {
+    const overById = "r".repeat(257);
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hello", requestId: overById })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/requestId exceeds maximum length/);
+  });
+
   it("rejects oversized systemPrompt", () => {
     const bigSystem = "x".repeat(64 * 1024 + 1);
     const result = parseClientMessage(
@@ -243,13 +273,13 @@ describe("parseClientMessage", () => {
     expect(result.message.type === "prompt" && result.message.provider).toBe("codex");
   });
 
-  it("defaults unknown provider to claude", () => {
+  it("rejects unknown provider", () => {
     const result = parseClientMessage(
       JSON.stringify({ type: "prompt", prompt: "hello", requestId: "r1", provider: "gemini" })
     );
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.message.type === "prompt" && result.message.provider).toBe("claude");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("Unknown provider");
   });
 
   it("truncates long unknown message types in error", () => {

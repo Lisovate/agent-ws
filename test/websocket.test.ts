@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 import { AgentWebSocketServer } from "../src/server/websocket.js";
-import type { Runner, RunOptions, RunHandlers } from "../src/process/claude-runner.js";
+import type { Runner, RunOptions, RunHandlers } from "../src/process/base-runner.js";
 import pino from "pino";
 
 const testLogger = pino({ level: "silent" });
@@ -464,6 +464,138 @@ describe("AgentWebSocketServer", () => {
       version: "1.0",
       agent: "agent-ws",
       mode: "unrestricted",
+    });
+  });
+
+  describe("per-IP rate limiting", () => {
+    it("rejects connections exceeding per-IP limit", async () => {
+      port = nextPort++;
+      server = new AgentWebSocketServer({
+        port,
+        host: "localhost",
+        logger: testLogger,
+        claudeRunnerFactory: () => new MockRunner(),
+        maxConnectionsPerIp: 2,
+      });
+      await server.start();
+
+      // First two connections should succeed
+      const { client: c1 } = await connect(port);
+      const { client: c2 } = await connect(port);
+
+      // Third should be rejected with 4029
+      const ws3 = new WebSocket(`ws://localhost:${port}`);
+      const code = await new Promise<number>((resolve) => {
+        ws3.on("close", (closeCode) => resolve(closeCode));
+      });
+      expect(code).toBe(4029);
+
+      c1.close();
+      c2.close();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    it("allows new connections after previous ones disconnect", async () => {
+      port = nextPort++;
+      server = new AgentWebSocketServer({
+        port,
+        host: "localhost",
+        logger: testLogger,
+        claudeRunnerFactory: () => new MockRunner(),
+        maxConnectionsPerIp: 1,
+      });
+      await server.start();
+
+      const { client: c1 } = await connect(port);
+      c1.close();
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Should succeed after first disconnected
+      const { client: c2, firstMsg } = await connect(port);
+      expect(firstMsg.type).toBe("connected");
+      c2.close();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+  });
+
+  describe("graceful shutdown", () => {
+    it("resolves immediately when no requests are in flight", async () => {
+      createServer();
+      await server.start();
+      const { client: c } = await connect(port);
+      client = c;
+
+      const start = Date.now();
+      await server.gracefulStop(2000);
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeLessThan(500);
+    });
+
+    it("sends 'Server is shutting down' error to clients with active requests", async () => {
+      const ctx = createServer();
+      await server.start();
+      const { client: c } = await connect(port);
+      client = c;
+
+      client.send(JSON.stringify({ type: "prompt", prompt: "long task", requestId: "req-gs" }));
+      await new Promise((r) => setTimeout(r, 50));
+
+      const errorP = nextMessage(client);
+      // Don't await — gracefulStop will hang until the request completes
+      const stopP = server.gracefulStop(500);
+
+      const msg = await errorP;
+      expect(msg).toEqual({ type: "error", message: "Server is shutting down" });
+
+      // Simulate the runner completing so gracefulStop can resolve
+      ctx.claudeRunner().lastHandlers!.onComplete("req-gs");
+      await stopP;
+    });
+
+    it("waits for in-flight request to complete before stopping", async () => {
+      const ctx = createServer();
+      await server.start();
+      const { client: c } = await connect(port);
+      client = c;
+
+      client.send(JSON.stringify({ type: "prompt", prompt: "task", requestId: "req-wait" }));
+      await new Promise((r) => setTimeout(r, 50));
+
+      const stopP = server.gracefulStop(2000);
+
+      // Drain the "shutting down" notice so it doesn't surface later
+      client.on("message", () => {});
+
+      // Complete after 150ms — gracefulStop should resolve shortly after
+      setTimeout(() => ctx.claudeRunner().lastHandlers!.onComplete("req-wait"), 150);
+
+      const start = Date.now();
+      await stopP;
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeGreaterThanOrEqual(140);
+      expect(elapsed).toBeLessThan(800);
+    });
+
+    it("force-stops after timeout when request never completes", async () => {
+      createServer();
+      await server.start();
+      const { client: c } = await connect(port);
+      client = c;
+
+      client.send(JSON.stringify({ type: "prompt", prompt: "stuck", requestId: "req-stuck" }));
+      await new Promise((r) => setTimeout(r, 50));
+
+      client.on("message", () => {});
+
+      const start = Date.now();
+      await server.gracefulStop(200);
+      const elapsed = Date.now() - start;
+
+      // Should resolve after ~200ms even though no completion came
+      expect(elapsed).toBeGreaterThanOrEqual(180);
+      expect(elapsed).toBeLessThan(800);
     });
   });
 
