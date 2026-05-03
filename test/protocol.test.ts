@@ -133,6 +133,36 @@ describe("parseClientMessage", () => {
     expect(result.error).toMatch(/exceeds maximum size/);
   });
 
+  it("rejects oversized requestId", () => {
+    const longId = "r".repeat(300);
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hello", requestId: longId })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/requestId exceeds maximum length/);
+  });
+
+  it("accepts requestId at exactly 256 chars", () => {
+    const exactId = "r".repeat(256);
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hello", requestId: exactId })
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.message.type === "prompt" && result.message.requestId).toBe(exactId);
+  });
+
+  it("rejects requestId at 257 chars", () => {
+    const overById = "r".repeat(257);
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hello", requestId: overById })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/requestId exceeds maximum length/);
+  });
+
   it("rejects oversized systemPrompt", () => {
     const bigSystem = "x".repeat(64 * 1024 + 1);
     const result = parseClientMessage(
@@ -243,13 +273,13 @@ describe("parseClientMessage", () => {
     expect(result.message.type === "prompt" && result.message.provider).toBe("codex");
   });
 
-  it("defaults unknown provider to claude", () => {
+  it("rejects unknown provider", () => {
     const result = parseClientMessage(
       JSON.stringify({ type: "prompt", prompt: "hello", requestId: "r1", provider: "gemini" })
     );
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.message.type === "prompt" && result.message.provider).toBe("claude");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("Unknown provider");
   });
 
   it("truncates long unknown message types in error", () => {
@@ -386,11 +416,65 @@ describe("parseClientMessage", () => {
     if (!result.ok) return;
     expect(result.message.type === "prompt" && result.message.images).toBeUndefined();
   });
+
+  it("rejects more than 100 files", () => {
+    const files = Array.from({ length: 101 }, (_, i) => ({
+      path: `file-${i}.txt`,
+      content: "x",
+    }));
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hi", requestId: "r1", files })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/Too many files/);
+  });
+
+  it("rejects files exceeding 50MB total", () => {
+    // Each file ~10MB, 6 files = 60MB > 50MB limit
+    const files = Array.from({ length: 6 }, (_, i) => ({
+      path: `file-${i}.txt`,
+      content: "x".repeat(10 * 1024 * 1024),
+    }));
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hi", requestId: "r1", files })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/Total file content exceeds maximum size/);
+  });
+
+  it("rejects file with empty path", () => {
+    const result = parseClientMessage(
+      JSON.stringify({
+        type: "prompt",
+        prompt: "hi",
+        requestId: "r1",
+        files: [{ path: "", content: "data" }],
+      })
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBe("File path must not be empty");
+  });
+
+  it("accepts files within limits", () => {
+    const files = [
+      { path: "src/App.tsx", content: "export default function App() {}" },
+      { path: "src/index.ts", content: "import App from './App';" },
+    ];
+    const result = parseClientMessage(
+      JSON.stringify({ type: "prompt", prompt: "hi", requestId: "r1", files })
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.message.type === "prompt" && result.message.files).toEqual(files);
+  });
 });
 
 describe("serializeMessage", () => {
   it("serializes a connected message", () => {
-    const msg: AgentMessage = { type: "connected", version: "1.0", agent: "agent-ws" };
+    const msg: AgentMessage = { type: "connected", version: "1.0", agent: "agent-ws", mode: "safe" };
     const serialized = serializeMessage(msg);
     expect(JSON.parse(serialized)).toEqual(msg);
   });
