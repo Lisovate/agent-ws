@@ -6,7 +6,7 @@ const pkg = JSON.parse(readFileSync("package.json", "utf-8"));
 const shared = {
   bundle: true,
   platform: "node",
-  target: "node18",
+  target: "node20",
   format: "esm",
   external: ["ws", "pino", "pino-pretty", "commander"],
   sourcemap: true,

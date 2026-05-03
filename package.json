@@ -1,29 +1,36 @@
 {
-  "name": "agent-ws",
-  "version": "1.0.4",
-  "description": "WebSocket bridge for CLI AI agents — stream Claude and Codex CLI responses over WebSocket",
-  "type": "module",
-  "main": "dist/index.js",
-  "bin": {
-    "agent-ws": "dist/cli.js"
+  "bin" : {
+    "agent-ws" : "dist/cli.js"
   },
-  "files": [
+  "bugs" : {
+    "url" : "https://github.com/Lisovate/agent-ws/issues"
+  },
+  "dependencies" : {
+    "commander" : "^14.0.3",
+    "pino" : "^10.3.1",
+    "pino-pretty" : "^13.0.0",
+    "ws" : "^8.16.0"
+  },
+  "description" : "WebSocket bridge for CLI AI agents — stream Claude and Codex CLI responses over WebSocket",
+  "devDependencies" : {
+    "@types/node" : "^25.2.2",
+    "@types/ws" : "^8.5.0",
+    "esbuild" : "^0.27.3",
+    "tsx" : "^4.21.0",
+    "typescript" : "^5.7.0",
+    "vitest" : "^4.0.18"
+  },
+  "engines" : {
+    "node" : ">=20.0.0"
+  },
+  "files" : [
     "dist/",
     "README.md",
     "LICENSE",
     "SECURITY.md"
   ],
-  "scripts": {
-    "build": "node build.js",
-    "dev": "tsx watch src/cli.ts",
-    "start": "node dist/cli.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist *.tsbuildinfo",
-    "prepublishOnly": "npm run clean && npm run build && npm run typecheck && npm test"
-  },
-  "keywords": [
+  "homepage" : "https://github.com/Lisovate/agent-ws#readme",
+  "keywords" : [
     "claude",
     "codex",
     "ai",
@@ -34,30 +41,26 @@
     "websocket",
     "streaming"
   ],
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Lisovate/agent-ws.git"
+  "license" : "MIT",
+  "main" : "dist/index.js",
+  "name" : "agent-ws",
+  "overrides" : {
+    "picomatch" : "4.0.4"
   },
-  "homepage": "https://github.com/Lisovate/agent-ws#readme",
-  "bugs": {
-    "url": "https://github.com/Lisovate/agent-ws/issues"
+  "repository" : {
+    "type" : "git",
+    "url" : "git+https://github.com/Lisovate/agent-ws.git"
   },
-  "engines": {
-    "node": ">=20.0.0"
+  "scripts" : {
+    "build" : "node build.js",
+    "clean" : "rm -rf dist *.tsbuildinfo",
+    "dev" : "tsx watch src/cli.ts",
+    "prepublishOnly" : "npm run clean && npm run build && npm run typecheck && npm test",
+    "start" : "node dist/cli.js",
+    "test" : "vitest run",
+    "test:watch" : "vitest",
+    "typecheck" : "tsc --noEmit"
   },
-  "dependencies": {
-    "commander": "^14.0.3",
-    "pino": "^10.3.1",
-    "pino-pretty": "^13.0.0",
-    "ws": "^8.16.0"
-  },
-  "devDependencies": {
-    "@types/node": "^25.2.2",
-    "@types/ws": "^8.5.0",
-    "esbuild": "^0.27.3",
-    "tsx": "^4.21.0",
-    "typescript": "^5.7.0",
-    "vitest": "^4.0.18"
-  }
+  "type" : "module",
+  "version" : "1.0.5"
 }
