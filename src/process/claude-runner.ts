@@ -1,308 +1,196 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
-import { tmpdir } from "node:os";
-import { createInterface } from "node:readline";
+import { writeFileSync } from "node:fs";
 import type { Logger } from "../utils/logger.js";
-import type { PromptImage } from "../server/protocol.js";
-
-export interface RunOptions {
-  prompt: string;
-  model?: string;
-  systemPrompt?: string;
-  projectId?: string;
-  requestId: string;
-  thinkingTokens?: number;
-  images?: PromptImage[];
-}
-
-export interface RunHandlers {
-  onChunk: (content: string, requestId: string, thinking?: boolean) => void;
-  onComplete: (requestId: string) => void;
-  onError: (message: string, requestId: string) => void;
-}
-
-/** Interface for runner injection (testing) */
-export interface Runner {
-  run(options: RunOptions, handlers: RunHandlers): void;
-  kill(): void;
-  dispose(): void;
-}
+import type { PermissionMode } from "../server/protocol.js";
+import {
+  BaseRunner,
+  isWithin,
+  type RunOptions,
+  type RunHandlers,
+} from "./base-runner.js";
+import { ClaudeStreamParser } from "./claude-stream-parser.js";
 
 export interface ClaudeRunnerOptions {
   claudePath?: string;
   timeoutMs?: number;
   logger: Logger;
   sessionDir?: string;
+  mode?: PermissionMode;
 }
 
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const ALLOWED_ENV_KEYS = [
+  "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
+  "ANTHROPIC_API_KEY", "NODE_PATH", "XDG_CONFIG_HOME",
+] as const;
 
-export class ClaudeRunner implements Runner {
-  private process: ChildProcess | null = null;
-  private timeout: NodeJS.Timeout | null = null;
-  private disposed = false;
-  private killed = false;
-  private readonly claudePath: string;
-  private readonly timeoutMs: number;
-  private readonly log: Logger;
-  private readonly sessionDir: string;
+const SANDBOX_SYSTEM_PROMPT = [
+  "IMPORTANT: You are working in a sandboxed project directory.",
+  "All file operations (Write, Edit, Read, Glob, Grep) MUST use relative paths within the current working directory.",
+  "NEVER use absolute paths starting with /.",
+  "Example: use 'src/App.tsx', NOT '/Users/.../src/App.tsx'.",
+].join(" ");
+
+const SANDBOX_CLAUDE_MD = [
+  "# Project Rules",
+  "",
+  "CRITICAL: This is a sandboxed workspace. All file operations MUST use relative paths.",
+  "",
+  "- ALWAYS use relative paths (e.g. `src/App.tsx`)",
+  "- NEVER use absolute paths (e.g. `/Users/.../src/App.tsx`)",
+  "- All project files are in the current working directory",
+  "",
+].join("\n");
+
+export function buildClaudeArgs(mode: PermissionMode, options: {
+  hasImages: boolean;
+  projectId?: string;
+  model?: string;
+  systemPrompt?: string;
+}): string[] {
+  const args = ["--print", "--verbose", "--output-format", "stream-json"];
+
+  switch (mode) {
+    case "safe":
+      args.push("--max-turns", "1", "--tools", "");
+      break;
+    case "agentic":
+      args.push(
+        "--permission-mode", "dontAsk",
+        "--allowedTools", "Read(**),Write(**),Edit(**),Glob(**),Grep(**)",
+      );
+      break;
+    case "unrestricted":
+      args.push("--dangerously-skip-permissions");
+      break;
+  }
+
+  // Sandbox instructions for modes that allow file tools
+  if (mode === "agentic" || mode === "unrestricted") {
+    args.push("--append-system-prompt", SANDBOX_SYSTEM_PROMPT);
+  }
+
+  if (options.hasImages) {
+    args.push("--input-format", "stream-json");
+  }
+  if (options.projectId) {
+    args.push("--continue");
+  }
+  if (options.model) {
+    args.push("--model", options.model);
+  }
+  if (options.systemPrompt) {
+    args.push("--append-system-prompt", options.systemPrompt);
+  }
+  args.push("-");
+
+  return args;
+}
+
+export class ClaudeRunner extends BaseRunner {
+  private currentCwd: string | null = null;
+  private readonly parser = new ClaudeStreamParser();
 
   constructor(options: ClaudeRunnerOptions) {
-    this.claudePath = options.claudePath ?? "claude";
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.log = options.logger;
-    this.sessionDir = options.sessionDir ?? "agent-ws-sessions";
-  }
-
-  get isRunning(): boolean {
-    return this.process !== null;
-  }
-
-  run(options: RunOptions, handlers: RunHandlers): void {
-    if (this.disposed) {
-      handlers.onError("Runner has been disposed", options.requestId);
-      return;
-    }
-
-    // Kill any existing process first
-    this.kill();
-
-    const { prompt, model, systemPrompt, projectId, requestId, thinkingTokens, images } = options;
-    const hasImages = images && images.length > 0;
-
-    const args = [
-      "--print",
-      "--verbose",
-      "--output-format", "stream-json",
-      "--max-turns", "1",  // Single-turn text output, no agentic loops
-      "--tools", "",       // Disable tool use — we only want generated text
-    ];
-    // Use stream-json input when images are present (supports content blocks)
-    if (hasImages) {
-      args.push("--input-format", "stream-json");
-    }
-    // Only resume session when a projectId is provided (scoped by CWD)
-    if (projectId) {
-      args.push("--continue");
-    }
-    if (model) {
-      args.push("--model", model);
-    }
-    if (systemPrompt) {
-      args.push("--append-system-prompt", systemPrompt);
-    }
-    // Prompt is piped via stdin (no arg length limits, no flag-parsing issues)
-    args.push("-");
-
-    this.log.info({ requestId, model, promptLength: prompt.length }, "Spawning Claude process");
-    this.killed = false;
-
-    // Use project-scoped CWD so --continue resumes the correct session
-    // (Claude CLI scopes sessions by working directory)
-    let cwd: string | undefined;
-    if (projectId) {
-      const base = resolve(tmpdir(), this.sessionDir);
-      cwd = resolve(base, projectId);
-      if (!cwd.startsWith(base + "/") && cwd !== base) {
-        handlers.onError("Invalid projectId", requestId);
-        return;
-      }
-      mkdirSync(cwd, { recursive: true });
-    }
-
-    try {
-      const ALLOWED_ENV_KEYS = [
-        "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
-        "ANTHROPIC_API_KEY", "NODE_PATH", "XDG_CONFIG_HOME",
-      ];
-      const env: Record<string, string> = {};
-      if (thinkingTokens !== undefined) {
-        env["MAX_THINKING_TOKENS"] = String(thinkingTokens);
-      }
-      for (const key of ALLOWED_ENV_KEYS) {
-        if (process.env[key]) env[key] = process.env[key]!;
-      }
-
-      this.process = spawn(this.claudePath, args, {
-        stdio: ["pipe", "pipe", "pipe"],
-        cwd,
-        env,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to start Claude";
-      this.log.error({ err, requestId }, "Failed to spawn Claude process");
-      handlers.onError(message, requestId);
-      return;
-    }
-
-    this.log.debug({ pid: this.process.pid, requestId }, "Claude process spawned");
-
-    // Write prompt to stdin and close it
-    if (this.process.stdin) {
-      if (hasImages) {
-        // stream-json input: structured message with image content blocks
-        const content: Array<Record<string, unknown>> = [];
-        for (const img of images!) {
-          content.push({
-            type: "image",
-            source: { type: "base64", media_type: img.media_type, data: img.data },
-          });
-        }
-        content.push({ type: "text", text: prompt });
-        const msg = JSON.stringify({ type: "user", message: { role: "user", content } });
-        this.process.stdin.write(msg + "\n");
-      } else {
-        this.process.stdin.write(prompt);
-      }
-      this.process.stdin.end();
-    }
-
-    // Guard against double handler invocation (e.g. error + exit both firing)
-    let handlersDone = false;
-    const finish = (cb: () => void) => {
-      if (handlersDone) return;
-      handlersDone = true;
-      this.clearTimeout();
-      cb();
-    };
-
-    // Set up timeout
-    this.timeout = setTimeout(() => {
-      this.log.warn({ requestId }, "Claude process timed out");
-      this.kill();
-      finish(() => handlers.onError("Process timed out", requestId));
-    }, this.timeoutMs);
-
-    // Parse NDJSON from stdout
-    if (this.process.stdout) {
-      const rl = createInterface({ input: this.process.stdout });
-      rl.on("line", (line) => {
-        this.parseStreamLine(line, handlers, requestId);
-      });
-    }
-
-    // Capture stderr — logs at warn level so errors are visible
-    if (this.process.stderr) {
-      const stderrRl = createInterface({ input: this.process.stderr });
-      stderrRl.on("line", (line) => {
-        if (line.trim()) {
-          this.log.warn({ requestId, stderr: line }, "Claude stderr");
-        }
-      });
-    }
-
-    // Handle exit
-    this.process.on("exit", (exitCode, signal) => {
-      this.process = null;
-
-      if (this.killed) {
-        this.log.debug({ requestId }, "Claude process was killed");
-        return;
-      }
-
-      if (exitCode === 0) {
-        this.log.info({ requestId }, "Claude process completed successfully");
-        finish(() => handlers.onComplete(requestId));
-      } else {
-        const reason = exitCode !== null
-          ? `Claude CLI exited with code ${exitCode}`
-          : `Claude CLI killed by signal ${signal ?? "unknown"}`;
-        this.log.warn({ requestId, exitCode, signal }, reason);
-        finish(() => handlers.onError(reason, requestId));
-      }
+    super({
+      cliPath: options.claudePath ?? "claude",
+      defaultCliPath: "claude",
+      timeoutMs: options.timeoutMs,
+      logger: options.logger,
+      sessionDir: options.sessionDir,
+      mode: options.mode,
+      agentLabel: "Claude",
+      allowedEnvKeys: ALLOWED_ENV_KEYS,
     });
+  }
 
-    this.process.on("error", (err) => {
-      this.process = null;
-      this.log.error({ err, requestId }, "Claude process error");
-      finish(() => handlers.onError(err.message, requestId));
+  protected onBeforeRun(_options: RunOptions): void {
+    this.parser.reset();
+  }
+
+  protected onCwdReady(cwd: string | undefined): void {
+    this.currentCwd = cwd ?? null;
+  }
+
+  protected writeSandboxFiles(cwd: string | undefined): void {
+    if (cwd && (this.mode === "agentic" || this.mode === "unrestricted")) {
+      writeFileSync(resolve(cwd, "CLAUDE.md"), SANDBOX_CLAUDE_MD, "utf-8");
+    }
+  }
+
+  protected buildExtraEnv(options: RunOptions): Record<string, string> {
+    if (options.thinkingTokens === undefined) return {};
+    return { MAX_THINKING_TOKENS: String(options.thinkingTokens) };
+  }
+
+  protected buildArgs(options: RunOptions): string[] {
+    return buildClaudeArgs(this.mode, {
+      hasImages: !!(options.images && options.images.length > 0),
+      projectId: options.projectId,
+      model: options.model,
+      systemPrompt: this.lastSystemPrompt,
+    });
+  }
+
+  protected writeStdin(proc: ChildProcess, options: RunOptions): void {
+    const hasImages = !!(options.images && options.images.length > 0);
+    if (!hasImages) {
+      proc.stdin!.write(options.prompt);
+      return;
+    }
+    const content: Array<Record<string, unknown>> = options.images!.map((img) => ({
+      type: "image",
+      source: { type: "base64", media_type: img.media_type, data: img.data },
+    }));
+    content.push({ type: "text", text: options.prompt });
+    proc.stdin!.write(JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n");
+  }
+
+  protected onKill(): void {
+    this.parser.reset();
+  }
+
+  protected parseStreamLine(line: string, handlers: RunHandlers, requestId: string): void {
+    const cwd = this.currentCwd;
+    this.parser.parseLine(line, {
+      onChunk: (content, thinking) => handlers.onChunk(content, requestId, thinking),
+      onToolEvent: (event) => handlers.onToolEvent?.(event, requestId),
+      onFileChange: (change) => handlers.onFileChange?.(change, requestId),
+      onEditPath: (filePath) => {
+        if (cwd) this.readEditFile(cwd, filePath, handlers, requestId);
+      },
     });
   }
 
   /**
-   * Parse a single NDJSON line from Claude CLI's stream-json output.
-   *
-   * The stream-json format can emit several event types. We look for content
-   * in these known patterns (in priority order):
-   *
-   * 1. Raw Anthropic API event: { type: "content_block_delta", delta: { type: "text_delta"|"thinking_delta", text|thinking } }
-   * 2. Wrapped stream event:    { type: "stream_event", event: { type: "content_block_delta", ... } }
-   * 3. Complete assistant msg:   { type: "assistant", message: { content: [{ type: "text"|"thinking", text|thinking }] } }
+   * Resolve symlinks before reading so a planted symlink can't escape cwd.
+   * Fire-and-forget: errors are logged but don't propagate.
    */
-  private parseStreamLine(line: string, handlers: RunHandlers, requestId: string): void {
-    if (!line.trim()) return;
-
-    try {
-      const event = JSON.parse(line);
-
-      // Pattern 1: Raw content_block_delta
-      if (event.type === "content_block_delta") {
-        if (event.delta?.type === "text_delta" && event.delta.text) {
-          handlers.onChunk(event.delta.text, requestId);
-        } else if (event.delta?.type === "thinking_delta" && event.delta.thinking) {
-          handlers.onChunk(event.delta.thinking, requestId, true);
-        }
-        return;
-      }
-
-      // Pattern 2: Wrapped in stream_event
-      if (event.type === "stream_event" && event.event) {
-        const inner = event.event;
-        if (inner.type === "content_block_delta") {
-          if (inner.delta?.type === "text_delta" && inner.delta.text) {
-            handlers.onChunk(inner.delta.text, requestId);
-          } else if (inner.delta?.type === "thinking_delta" && inner.delta.thinking) {
-            handlers.onChunk(inner.delta.thinking, requestId, true);
-          }
-        }
-        return;
-      }
-
-      // Pattern 3: Complete assistant message
-      if (event.type === "assistant" && Array.isArray(event.message?.content)) {
-        for (const block of event.message.content) {
-          if (block.type === "text" && block.text) {
-            handlers.onChunk(block.text, requestId);
-          } else if (block.type === "thinking" && block.thinking) {
-            handlers.onChunk(block.thinking, requestId, true);
-          }
-        }
-        return;
-      }
-
-      // Result event — ignore (we already streamed the content)
-      if (event.type === "result") {
-        return;
-      }
-    } catch {
-      // Non-JSON line, skip
+  private readEditFile(cwd: string, filePath: string, handlers: RunHandlers, requestId: string): void {
+    if (!isWithin(cwd, filePath)) {
+      this.log.warn({ requestId, path: filePath }, "Skipping Edit file outside session directory");
+      return;
     }
-  }
-
-  kill(): void {
-    this.clearTimeout();
-    if (this.process) {
-      this.log.debug({ pid: this.process.pid }, "Killing Claude process");
-      this.killed = true;
-      try {
-        this.process.kill();
-      } catch {
-        // Process may already be dead
-      }
-      this.process = null;
-    }
-  }
-
-  dispose(): void {
-    this.disposed = true;
-    this.kill();
-  }
-
-  private clearTimeout(): void {
-    if (this.timeout) {
-      clearTimeout(this.timeout);
-      this.timeout = null;
-    }
+    const fullPath = resolve(cwd, filePath);
+    realpath(fullPath)
+      .then((realPath) => {
+        if (!isWithin(cwd, realPath)) {
+          this.log.warn({ requestId, path: filePath, realPath }, "Skipping Edit file: symlink escapes session dir");
+          return undefined;
+        }
+        return readFile(realPath, "utf-8");
+      })
+      .then((content) => {
+        if (content === undefined) return;
+        try {
+          handlers.onFileChange?.({ path: filePath, changeType: "update", content }, requestId);
+        } catch (err) {
+          this.log.debug({ requestId, path: filePath, err }, "Error in onFileChange callback");
+        }
+      })
+      .catch((err) => {
+        this.log.debug({ requestId, path: filePath, err }, "Failed to read edited file");
+      });
   }
 }
