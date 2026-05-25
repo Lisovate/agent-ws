@@ -1,7 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import type { Logger } from "../utils/logger.js";
 import type { PermissionMode } from "../server/protocol.js";
 import {
@@ -9,6 +9,7 @@ import {
   type RunOptions,
   type RunHandlers,
 } from "./base-runner.js";
+import type { Sandbox } from "./sandbox/types.js";
 
 export interface CodexRunnerOptions {
   codexPath?: string;
@@ -16,11 +17,12 @@ export interface CodexRunnerOptions {
   logger: Logger;
   sessionDir?: string;
   mode?: PermissionMode;
+  sandbox?: Sandbox;
 }
 
 const ALLOWED_ENV_KEYS = [
   "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
-  "OPENAI_API_KEY", "NODE_PATH", "XDG_CONFIG_HOME",
+  "OPENAI_API_KEY", "CODEX_API_KEY", "NODE_PATH", "XDG_CONFIG_HOME",
 ] as const;
 
 const SANDBOX_INSTRUCTIONS = [
@@ -40,10 +42,19 @@ export function buildCodexArgs(mode: PermissionMode, options: {
     ? ["exec", "resume", options.threadId, "--json", "--skip-git-repo-check"]
     : ["exec", "--json", "--skip-git-repo-check"];
 
-  if (mode === "unrestricted") {
-    args.push("--sandbox", "danger-full-access", "--ask-for-approval", "never");
-  } else {
-    args.push("--full-auto");
+  // Codex has no interactive approval channel over agent-ws, so disable
+  // approval prompts unconditionally. Sandbox level varies by mode.
+  args.push("--ask-for-approval", "never");
+  switch (mode) {
+    case "safe":
+      args.push("--sandbox", "read-only");
+      break;
+    case "agentic":
+      args.push("--sandbox", "workspace-write");
+      break;
+    case "unrestricted":
+      args.push("--sandbox", "danger-full-access");
+      break;
   }
 
   if (options.model && !options.resuming) {
@@ -73,7 +84,13 @@ export class CodexRunner extends BaseRunner {
       mode: options.mode,
       agentLabel: "Codex",
       allowedEnvKeys: ALLOWED_ENV_KEYS,
+      sandbox: options.sandbox,
     });
+  }
+
+  protected credentialDirs(): string[] {
+    const home = homedir();
+    return [resolve(home, ".codex"), resolve(home, ".config", "codex")];
   }
 
   protected onBeforeRun(options: RunOptions): void {

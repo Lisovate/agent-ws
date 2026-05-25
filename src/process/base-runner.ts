@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import type { Logger } from "../utils/logger.js";
 import type { PromptImage, PromptFile, PermissionMode } from "../server/protocol.js";
+import { NoopSandbox } from "./sandbox/noop.js";
+import type { Sandbox } from "./sandbox/types.js";
 
 /**
  * Returns true if `child` resolves to a path inside (or equal to) `parent`.
@@ -64,6 +66,8 @@ export interface BaseRunnerOptions {
   mode?: PermissionMode;
   agentLabel: string;
   allowedEnvKeys: readonly string[];
+  /** Sandbox wrapper applied to every spawn. Defaults to NoopSandbox. */
+  sandbox?: Sandbox;
 }
 
 const DEFAULT_TIMEOUT_MS = 600_000; // 10 minutes for multi-turn work
@@ -79,6 +83,7 @@ export abstract class BaseRunner implements Runner {
   protected readonly log: Logger;
   protected readonly sessionDir: string;
   protected readonly mode: PermissionMode;
+  protected readonly sandbox: Sandbox;
   private readonly agentLabel: string;
   private readonly allowedEnvKeys: readonly string[];
 
@@ -88,6 +93,7 @@ export abstract class BaseRunner implements Runner {
     this.log = options.logger;
     this.sessionDir = options.sessionDir ?? "agent-ws-sessions";
     this.mode = options.mode ?? "safe";
+    this.sandbox = options.sandbox ?? new NoopSandbox();
     this.agentLabel = options.agentLabel;
     this.allowedEnvKeys = options.allowedEnvKeys;
   }
@@ -158,12 +164,26 @@ export abstract class BaseRunner implements Runner {
     // Build args
     const args = this.buildArgs(options);
 
+    const wrapped = this.sandbox.wrapSpawn(this.cliPath, args, {
+      mode: this.mode,
+      sessionDir: cwd,
+      credentialDirs: this.credentialDirs(),
+    });
+    if (wrapped.env) {
+      // Sandbox env wins for any colliding key — the sandbox knows what it
+      // needs to inject (e.g. HOME inside a bwrap rootfs).
+      Object.assign(env, wrapped.env);
+    }
+
     const startTime = Date.now();
-    this.log.info({ requestId, model: options.model, promptLength: prompt.length }, `Spawning ${this.agentLabel} process`);
+    this.log.info(
+      { requestId, model: options.model, promptLength: prompt.length, sandbox: this.sandbox.id },
+      `Spawning ${this.agentLabel} process`,
+    );
     this.killed = false;
 
     try {
-      this.process = spawn(this.cliPath, args, {
+      this.process = spawn(wrapped.cmd, wrapped.args, {
         stdio: ["pipe", "pipe", "pipe"],
         cwd,
         env,
@@ -171,7 +191,7 @@ export abstract class BaseRunner implements Runner {
     } catch (err) {
       cleanup?.();
       const message = err instanceof Error ? err.message : `Failed to start ${this.agentLabel}`;
-      this.log.error({ err, requestId }, `Failed to spawn ${this.agentLabel} process`);
+      this.log.error({ err, requestId, sandbox: this.sandbox.id }, `Failed to spawn ${this.agentLabel} process`);
       handlers.onError(message, requestId);
       return;
     }
@@ -328,4 +348,10 @@ export abstract class BaseRunner implements Runner {
 
   /** Called during kill() for subclass cleanup (e.g. clearing maps). */
   protected onKill(): void {}
+
+  /** Credential directories the wrapped CLI agent must be able to read.
+   * Sandbox impls bind-mount these read-only. Subclasses override. */
+  protected credentialDirs(): string[] {
+    return [];
+  }
 }

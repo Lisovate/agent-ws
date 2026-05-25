@@ -2,6 +2,13 @@ import { Command } from "commander";
 import { randomBytes } from "node:crypto";
 import { AgentWS } from "./agent.js";
 import type { PermissionMode } from "./server/protocol.js";
+import {
+  isSandboxPreference,
+  selectSandbox,
+  SANDBOX_PREFERENCES,
+  type SandboxPreference,
+} from "./process/sandbox/index.js";
+import { createLogger } from "./utils/logger.js";
 import { checkCli } from "./utils/claude-check.js";
 
 declare const PKG_VERSION: string;
@@ -18,7 +25,8 @@ program
   .option("-c, --claude-path <path>", "Path to Claude CLI", "claude")
   .option("--codex-path <path>", "Path to Codex CLI", "codex")
   .option("-t, --timeout <seconds>", "Process timeout in seconds", "600")
-  .option("-m, --mode <mode>", "Permission mode: safe, agentic, unrestricted (default: safe)", "safe")
+  .option("-m, --mode <mode>", "Permission mode: safe, agentic, unrestricted", "safe")
+  .option("--sandbox <preference>", `Sandbox backend: ${SANDBOX_PREFERENCES.join(", ")}`, "none")
   .option("--log-level <level>", "Log level (debug, info, warn, error)", "info")
   .option("--no-auth", "Disable auth token requirement (allows any application to connect)")
   .option("--origins <origins>", "Comma-separated allowed origins")
@@ -29,6 +37,7 @@ program
     codexPath: string;
     timeout: string;
     mode: string;
+    sandbox: string;
     logLevel: string;
     auth: boolean;
     origins?: string;
@@ -41,23 +50,28 @@ program
 ╚═══════════════════════════════════════╝
 `);
 
-    // Check Claude CLI
-    const check = checkCli(opts.claudePath);
-    if (!check.available) {
-      console.error(`Claude CLI not found at: ${opts.claudePath}`);
-      console.error("Make sure Claude Code is installed and in your PATH.");
-      console.error("Install: npm install -g @anthropic-ai/claude-code");
-      console.error(`Or specify path: agent-ws --claude-path /path/to/claude`);
-      process.exit(1);
+    // Both CLIs are optional at startup — provider availability is reported
+    // via the capabilities handshake, and missing CLIs fail at prompt time
+    // for that provider only.
+    const claudeCheck = checkCli(opts.claudePath);
+    if (claudeCheck.available) {
+      console.log(`Found Claude CLI: ${claudeCheck.version}`);
+    } else {
+      console.log("Claude CLI not found (claude provider will be unavailable)");
     }
-    console.log(`Found Claude CLI: ${check.version}`);
 
-    // Check Codex CLI (optional — just warn if missing)
     const codexCheck = checkCli(opts.codexPath);
     if (codexCheck.available) {
       console.log(`Found Codex CLI: ${codexCheck.version}`);
     } else {
       console.log("Codex CLI not found (codex provider will be unavailable)");
+    }
+
+    if (!claudeCheck.available && !codexCheck.available) {
+      console.error("\nNo CLI agents found. Install at least one:");
+      console.error("  Claude: npm install -g @anthropic-ai/claude-code");
+      console.error("  Codex:  npm install -g @openai/codex");
+      process.exit(1);
     }
 
     // Validate mode
@@ -72,6 +86,22 @@ program
       console.warn("\n⚠  WARNING: Running in unrestricted mode — Claude has full system access (shell, network, file system).");
       console.warn("   Only use this in trusted, isolated environments.\n");
     }
+
+    // Validate + construct sandbox
+    if (!isSandboxPreference(opts.sandbox)) {
+      console.error(`Invalid --sandbox value: "${opts.sandbox}" (must be one of: ${SANDBOX_PREFERENCES.join(", ")})`);
+      process.exit(1);
+    }
+    const sandboxPreference: SandboxPreference = opts.sandbox;
+    const setupLog = createLogger({ level: opts.logLevel });
+    let sandbox;
+    try {
+      sandbox = selectSandbox({ preference: sandboxPreference, logger: setupLog });
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+    console.log(`Sandbox:    ${sandbox.id}${sandbox.unavailableReason ? ` (${sandbox.unavailableReason})` : ""}`);
 
     const port = parseInt(opts.port, 10);
     if (isNaN(port) || port < 1 || port > 65535) {
@@ -115,6 +145,7 @@ program
       allowedOrigins,
       mode,
       authToken,
+      sandbox,
     });
 
     try {

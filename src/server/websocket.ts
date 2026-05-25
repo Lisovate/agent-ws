@@ -4,11 +4,18 @@ import { timingSafeEqual } from "node:crypto";
 import { type Runner, type RunHandlers } from "../process/base-runner.js";
 import { ClaudeRunner } from "../process/claude-runner.js";
 import { CodexRunner } from "../process/codex-runner.js";
+import { NoopSandbox } from "../process/sandbox/noop.js";
+import { probeAvailableSandboxes } from "../process/sandbox/index.js";
+import type { Sandbox } from "../process/sandbox/types.js";
+import { checkCli } from "../utils/claude-check.js";
 import {
   parseClientMessage,
+  PROTOCOL_VERSION,
   serializeMessage,
   type AgentMessage,
+  type CapabilitiesMessage,
   type PermissionMode,
+  type ProviderInfo,
   type PromptMessage,
 } from "./protocol.js";
 import type { Logger } from "../utils/logger.js";
@@ -48,6 +55,7 @@ export interface AgentWebSocketServerOptions {
   mode?: PermissionMode;
   authToken?: string;
   maxConnectionsPerIp?: number;
+  sandbox?: Sandbox;
 }
 
 export class AgentWebSocketServer {
@@ -60,11 +68,15 @@ export class AgentWebSocketServer {
   private readonly maxConnectionsPerIp: number;
   private readonly log: Logger;
   private readonly options: AgentWebSocketServerOptions;
+  private readonly sandbox: Sandbox;
+  /** Cached provider probe. Populated lazily on first capabilities request. */
+  private providerCache: ProviderInfo[] | null = null;
 
   constructor(options: AgentWebSocketServerOptions) {
     this.options = options;
     this.log = options.logger;
     this.maxConnectionsPerIp = options.maxConnectionsPerIp ?? MAX_CONNECTIONS_PER_IP;
+    this.sandbox = options.sandbox ?? new NoopSandbox();
   }
 
   start(): Promise<void> {
@@ -219,7 +231,7 @@ export class AgentWebSocketServer {
     // Send connected message
     this.sendMessage(ws, {
       type: "connected",
-      version: "1.0",
+      version: PROTOCOL_VERSION,
       agent: this.options.agentName ?? "agent-ws",
       mode: this.options.mode ?? "safe",
     });
@@ -261,7 +273,37 @@ export class AgentWebSocketServer {
       case "cancel":
         this.handleCancel(ws, state);
         break;
+      case "capabilities":
+        this.handleCapabilities(ws);
+        break;
     }
+  }
+
+  private handleCapabilities(ws: WebSocket): void {
+    const message: CapabilitiesMessage = {
+      type: "capabilities",
+      agent: this.options.agentName ?? "agent-ws",
+      version: PROTOCOL_VERSION,
+      mode: this.options.mode ?? "safe",
+      sandbox: {
+        active: this.sandbox.id,
+        available: probeAvailableSandboxes(),
+      },
+      providers: this.getProviderInfo(),
+    };
+    this.sendMessage(ws, message);
+  }
+
+  private getProviderInfo(): ProviderInfo[] {
+    if (this.providerCache) return this.providerCache;
+    const claude = checkCli(this.options.claudePath ?? "claude");
+    const codex = checkCli(this.options.codexPath ?? "codex");
+    const providers: ProviderInfo[] = [
+      { id: "claude", available: claude.available, version: claude.version },
+      { id: "codex", available: codex.available, version: codex.version },
+    ];
+    this.providerCache = providers;
+    return providers;
   }
 
   private handlePrompt(ws: WebSocket, state: ConnectionState, message: PromptMessage): void {
@@ -415,6 +457,7 @@ export class AgentWebSocketServer {
       logger: this.log.child({ component: "claude-runner" }),
       sessionDir: this.options.sessionDir,
       mode: this.options.mode,
+      sandbox: this.sandbox,
     });
   }
 
@@ -429,6 +472,7 @@ export class AgentWebSocketServer {
       logger: this.log.child({ component: "codex-runner" }),
       sessionDir: this.options.sessionDir,
       mode: this.options.mode,
+      sandbox: this.sandbox,
     });
   }
 

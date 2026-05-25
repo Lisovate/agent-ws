@@ -1,6 +1,8 @@
 node_modules/
 dist/
+docs/
 *.tsbuildinfo
+.DS_Store
 
 # Claude Code local settings
 CLAUDE.local.md

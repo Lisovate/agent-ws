@@ -1,6 +1,7 @@
 import { AgentWebSocketServer, type AgentWebSocketServerOptions, type RunnerFactory } from "./server/websocket.js";
 import type { PermissionMode } from "./server/protocol.js";
 import { createLogger, type Logger } from "./utils/logger.js";
+import type { Sandbox } from "./process/sandbox/types.js";
 
 export interface AgentWSOptions {
   port?: number;
@@ -18,6 +19,7 @@ export interface AgentWSOptions {
   sessionDir?: string;
   mode?: PermissionMode;
   authToken?: string;
+  sandbox?: Sandbox;
 }
 
 export class AgentWS {
@@ -42,6 +44,7 @@ export class AgentWS {
       sessionDir: options.sessionDir,
       mode: options.mode,
       authToken: options.authToken,
+      sandbox: options.sandbox,
     };
 
     this.server = new AgentWebSocketServer(serverOptions);

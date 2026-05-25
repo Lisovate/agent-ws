@@ -70,6 +70,13 @@ describe("parseClientMessage", () => {
     expect(result.message).toEqual({ type: "cancel", requestId: "req-1" });
   });
 
+  it("parses a capabilities request message", () => {
+    const result = parseClientMessage(JSON.stringify({ type: "capabilities" }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.message).toEqual({ type: "capabilities" });
+  });
+
   it("rejects invalid JSON", () => {
     const result = parseClientMessage("not json");
     expect(result.ok).toBe(false);

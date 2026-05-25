@@ -105,25 +105,40 @@ describe("buildClaudeArgs", () => {
 describe("buildCodexArgs", () => {
   const base = { resuming: false, imagePaths: [] as string[] };
 
-  it("safe mode uses --full-auto", () => {
+  it("safe mode uses --sandbox read-only", () => {
     const args = buildCodexArgs("safe", base);
-    expect(args).toContain("--full-auto");
-    expect(args).not.toContain("--sandbox");
+    expect(args).toContain("--sandbox");
+    expect(args[args.indexOf("--sandbox") + 1]).toBe("read-only");
+    expect(args).not.toContain("--full-auto");
   });
 
-  it("agentic mode uses --full-auto", () => {
+  it("agentic mode uses --sandbox workspace-write", () => {
     const args = buildCodexArgs("agentic", base);
-    expect(args).toContain("--full-auto");
-    expect(args).not.toContain("--sandbox");
+    expect(args).toContain("--sandbox");
+    expect(args[args.indexOf("--sandbox") + 1]).toBe("workspace-write");
+    expect(args).not.toContain("--full-auto");
   });
 
-  it("unrestricted mode uses danger-full-access sandbox", () => {
+  it("unrestricted mode uses --sandbox danger-full-access", () => {
     const args = buildCodexArgs("unrestricted", base);
     expect(args).toContain("--sandbox");
     expect(args[args.indexOf("--sandbox") + 1]).toBe("danger-full-access");
-    expect(args).toContain("--ask-for-approval");
-    expect(args[args.indexOf("--ask-for-approval") + 1]).toBe("never");
     expect(args).not.toContain("--full-auto");
+  });
+
+  it("every mode disables approval prompts (--ask-for-approval never)", () => {
+    for (const mode of ["safe", "agentic", "unrestricted"] as const) {
+      const args = buildCodexArgs(mode, base);
+      expect(args).toContain("--ask-for-approval");
+      expect(args[args.indexOf("--ask-for-approval") + 1]).toBe("never");
+    }
+  });
+
+  it("never emits the deprecated --full-auto flag", () => {
+    for (const mode of ["safe", "agentic", "unrestricted"] as const) {
+      const args = buildCodexArgs(mode, base);
+      expect(args).not.toContain("--full-auto");
+    }
   });
 
   it("always includes exec --json --skip-git-repo-check", () => {

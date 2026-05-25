@@ -21,7 +21,13 @@ export const MAX_TOTAL_FILE_BYTES = 50 * 1024 * 1024;
 const VALID_PROVIDERS = new Set<string>(["claude", "codex"]);
 const encoder = new TextEncoder();
 
+/** Wire version of the agent-ws protocol. Increment when adding a
+ * non-backward-compatible client/agent message shape. */
+export const PROTOCOL_VERSION = "1.1";
+
 export type PermissionMode = "safe" | "agentic" | "unrestricted";
+
+export type ProviderId = "claude" | "codex";
 
 // --- Client → Agent messages ---
 
@@ -53,7 +59,11 @@ export interface CancelMessage {
   requestId?: string;
 }
 
-export type ClientMessage = PromptMessage | CancelMessage;
+export interface CapabilitiesRequestMessage {
+  type: "capabilities";
+}
+
+export type ClientMessage = PromptMessage | CancelMessage | CapabilitiesRequestMessage;
 
 // --- Agent → Client messages ---
 
@@ -99,13 +109,38 @@ export interface FileChangeMessage {
   content?: string;
 }
 
+export interface ProviderInfo {
+  id: ProviderId;
+  available: boolean;
+  /** CLI version string when available; undefined when the binary isn't on
+   * PATH or the version probe failed. */
+  version?: string;
+}
+
+export interface SandboxCapabilities {
+  /** ID of the sandbox currently wrapping spawned CLI processes. */
+  active: string;
+  /** IDs of every sandbox backend that could be activated on this host. */
+  available: string[];
+}
+
+export interface CapabilitiesMessage {
+  type: "capabilities";
+  agent: string;
+  version: string;
+  mode: PermissionMode;
+  sandbox: SandboxCapabilities;
+  providers: ProviderInfo[];
+}
+
 export type AgentMessage =
   | ConnectedMessage
   | ChunkMessage
   | CompleteMessage
   | ErrorMessage
   | ToolEventMessage
-  | FileChangeMessage;
+  | FileChangeMessage
+  | CapabilitiesMessage;
 
 // --- Parsing & validation ---
 
@@ -140,6 +175,9 @@ export function parseClientMessage(raw: string): ParseResult {
       ok: true,
       message: { type: "cancel", requestId: typeof requestId === "string" ? requestId : undefined },
     };
+  }
+  if (type === "capabilities") {
+    return { ok: true, message: { type: "capabilities" } };
   }
   return err(`Unknown message type: ${truncate(type)}`);
 }

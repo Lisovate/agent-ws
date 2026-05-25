@@ -69,6 +69,7 @@ await agent.start();
 -p, --port <port>            WebSocket server port (default: 9999)
 -H, --host <host>            WebSocket server host (default: localhost)
 -m, --mode <mode>            Permission mode: safe, agentic, unrestricted (default: safe)
+    --sandbox <preference>   Sandbox backend: auto, none, os, seatbelt, bwrap (default: none)
 -c, --claude-path <path>     Path to Claude CLI (default: claude)
     --codex-path <path>      Path to Codex CLI (default: codex)
 -t, --timeout <seconds>      Process timeout in seconds (default: 600)
@@ -91,16 +92,70 @@ agent-ws --mode unrestricted  # Full system access — shell, network, everythin
 
 | Mode | Claude CLI flags | Codex CLI flags | Capabilities |
 |------|-----------------|-----------------|--------------|
-| `safe` | `--max-turns 1 --tools ""` | `--full-auto` | Text only, no tools |
-| `agentic` | `--permission-mode dontAsk --allowedTools "Read(**),Write(**),Edit(**),Glob(**),Grep(**)"` | `--full-auto` | File ops only, no shell/network |
+| `safe` | `--max-turns 1 --tools ""` | `--sandbox read-only --ask-for-approval never` | Text only, no tools |
+| `agentic` | `--permission-mode dontAsk --allowedTools "Read(**),Write(**),Edit(**),Glob(**),Grep(**)"` | `--sandbox workspace-write --ask-for-approval never` | File ops only, no shell/network |
 | `unrestricted` | `--dangerously-skip-permissions` | `--sandbox danger-full-access --ask-for-approval never` | Everything |
 
 **Choosing a mode:**
 - Use `safe` when you only need text responses (Q&A, code generation without file access)
-- Use `agentic` when Claude needs to read/write project files but shouldn't run commands
+- Use `agentic` when the CLI needs to read/write project files but shouldn't run arbitrary commands
 - Use `unrestricted` only in trusted, isolated environments where full system access is acceptable
 
 In `agentic` and `unrestricted` modes, both runners inject sandbox instructions requiring all file operations to use relative paths. Claude also writes a `CLAUDE.md` to the session directory reinforcing this constraint.
+
+## Sandboxing
+
+`--mode` controls what the CLI agent is *asked* to do. `--sandbox` controls what the spawned process can *actually* do at the OS level. Treat the two as belt-and-braces — flags can be ignored or bypassed; an OS sandbox enforces the boundary at the kernel.
+
+```bash
+agent-ws --sandbox none       # Default. No OS isolation; trust the CLI's own flags.
+agent-ws --sandbox os         # Pick the best OS-native sandbox for this platform.
+agent-ws --sandbox auto       # Same as os, but fall back to none with a warning instead of erroring.
+agent-ws --sandbox seatbelt   # macOS Seatbelt (sandbox-exec). Errors if unavailable.
+agent-ws --sandbox bwrap      # Linux bubblewrap. Errors if unavailable.
+```
+
+| Backend | Platform | Mechanism | Notes |
+|---------|----------|-----------|-------|
+| `none` | all | no-op | Same behavior as before this flag existed |
+| `seatbelt` | macOS | `/usr/bin/sandbox-exec` with curated SBPL profile | Apple-deprecated but still functional. Used by Claude Code, Gemini CLI, and most published agent setups today. |
+| `bwrap` | Linux | bubblewrap mount namespaces + `--unshare-all --share-net` | Requires unprivileged user namespaces. Ubuntu 24.04+ ships with these restricted; see Troubleshooting. |
+
+**What the sandbox restricts:**
+- Writes are scoped to the per-project session directory only (`safe` mode also blocks session-dir writes)
+- Credential directories (`~/.claude`, `~/.codex` and their `~/.config/...` equivalents) are mounted read-only so the CLI can authenticate but not exfiltrate
+- Process exec is denied in `safe` mode (except for a tiny shell whitelist the CLI needs to fork its own helpers)
+- macOS: outbound TCP is allowed only to a fixed list of agent API endpoints. Linux: outbound network is currently unrestricted — see Honest caveats below.
+
+**Honest caveats:**
+- `seatbelt` profiles need maintenance per macOS minor release and Apple may remove `sandbox-exec` entirely (no announced date).
+- `bwrap` cannot restrict outbound network by hostname (only by port). The Linux bwrap profile permits all outbound traffic in v1; pair with an external egress proxy if you need hostname allowlisting.
+- Windows has no native sandbox in this version. Use WSL2 and the Linux `bwrap` backend instead.
+- The default is `none` so existing setups keep working. Opt in explicitly with `--sandbox os` and report breakage.
+
+## Capabilities handshake
+
+Clients can query what's actually available on the server at runtime:
+
+```json
+// Client → Agent
+{ "type": "capabilities" }
+
+// Agent → Client
+{
+  "type": "capabilities",
+  "agent": "agent-ws",
+  "version": "1.1",
+  "mode": "agentic",
+  "sandbox": { "active": "seatbelt", "available": ["none", "seatbelt"] },
+  "providers": [
+    { "id": "claude", "available": true, "version": "2.1.141" },
+    { "id": "codex",  "available": false }
+  ]
+}
+```
+
+The reply is cached for the lifetime of the server, so CLI installations after startup require an agent-ws restart to be reflected.
 
 ## Architecture
 
@@ -134,6 +189,7 @@ Any WebSocket client can connect — browser frontends, backend services, script
 { "type": "prompt", "prompt": "...", "requestId": "uuid", "projectId": "my-app", "systemPrompt": "...", "thinkingTokens": 2048 }
 { "type": "prompt", "prompt": "Describe this image", "requestId": "uuid", "images": [{ "media_type": "image/png", "data": "<base64>" }] }
 { "type": "cancel", "requestId": "uuid" }
+{ "type": "capabilities" }
 ```
 
 | Field | Required | Description |
@@ -151,7 +207,8 @@ Any WebSocket client can connect — browser frontends, backend services, script
 ### Agent → Client
 
 ```json
-{ "type": "connected", "version": "1.0", "agent": "agent-ws", "mode": "safe" }
+{ "type": "connected", "version": "1.1", "agent": "agent-ws", "mode": "safe" }
+{ "type": "capabilities", "agent": "agent-ws", "version": "1.1", "mode": "safe", "sandbox": { "active": "none", "available": ["none"] }, "providers": [{ "id": "claude", "available": true, "version": "2.1.141" }, { "id": "codex", "available": false }] }
 { "type": "chunk", "content": "Here's a login form...", "requestId": "uuid" }
 { "type": "chunk", "content": "Let me think...", "requestId": "uuid", "thinking": true }
 { "type": "tool_event", "requestId": "uuid", "event": "start", "toolName": "Write", "toolId": "toolu_01" }
@@ -208,6 +265,7 @@ await agent.start();
 
 - **Auth token**: Random token generated on startup, required for all connections (disable with `--no-auth`)
 - **Safe by default**: `--mode safe` restricts to text-only responses with no tool access
+- **OS sandbox (opt-in)**: `--sandbox os` wraps every spawned CLI in Seatbelt (macOS) or bubblewrap (Linux). See [Sandboxing](#sandboxing) for guarantees and caveats.
 - **Local only**: Binds to `localhost` by default
 - **Origin validation**: Optional `--origins` flag restricts allowed origins
 - **No credentials**: Never stores or transmits API keys
@@ -236,17 +294,23 @@ src/
 ├── cli.ts                 # CLI entry point (Commander)
 ├── agent.ts               # Orchestrator: wires server + logger
 ├── server/
-│   ├── websocket.ts       # WebSocket server, heartbeat, per-connection state
-│   └── protocol.ts        # Message types, validation
+│   ├── websocket.ts       # WebSocket server, heartbeat, per-connection state, capabilities handshake
+│   └── protocol.ts        # Message types, validation, PROTOCOL_VERSION
 ├── process/
 │   ├── base-runner.ts          # Abstract BaseRunner: spawn/kill/timeout scaffolding, file-write sandbox
 │   ├── claude-runner.ts        # ClaudeRunner (extends BaseRunner): wires the parser, post-edit reads
 │   ├── claude-stream-parser.ts # Stateless parser for Claude's stream-json NDJSON output
 │   ├── codex-runner.ts         # CodexRunner (extends BaseRunner): JSONL parsing, thread resumption
-│   └── output-cleaner.ts       # ANSI stripping via node:util
+│   ├── output-cleaner.ts       # ANSI stripping via node:util
+│   └── sandbox/
+│       ├── index.ts            # selectSandbox factory + probeAvailableSandboxes
+│       ├── types.ts            # Sandbox interface and SandboxSpawnOpts
+│       ├── noop.ts             # NoopSandbox (default — no isolation)
+│       ├── seatbelt.ts         # macOS sandbox-exec backend + buildSeatbeltProfile
+│       └── bwrap.ts            # Linux bubblewrap backend + buildBwrapArgs
 └── utils/
     ├── logger.ts          # Pino logger factory
-    └── claude-check.ts    # Claude CLI availability check
+    └── claude-check.ts    # CLI availability probe
 ```
 
 ## Troubleshooting
@@ -258,11 +322,25 @@ npm install -g @anthropic-ai/claude-code
 claude --version
 ```
 
+agent-ws no longer hard-requires Claude — it'll start with only Codex (or vice versa). The capabilities handshake reports which providers are actually usable.
+
 ### "Port 9999 already in use"
 Another instance might be running. Kill it or use a different port:
 ```bash
 agent-ws --port 9998
 ```
+
+### `--sandbox=bwrap requested but unavailable: unprivileged user namespaces are restricted`
+Ubuntu 24.04+ disables unprivileged user namespaces by default. Either:
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0     # ephemeral
+# or persist:
+echo "kernel.apparmor_restrict_unprivileged_userns=0" | sudo tee /etc/sysctl.d/90-agent-ws.conf
+```
+Or install an AppArmor profile that whitelists the bwrap binary path. agent-ws falls back to `none` (with a startup warning) when you ask for `--sandbox auto` on a host where bwrap is blocked.
+
+### `sandbox-exec is deprecated` warnings on macOS
+Apple has marked `sandbox-exec` as deprecated but no removal date is announced and no replacement exists for sandboxing non-bundled binaries. Every published agent sandbox setup uses it today. The warning is cosmetic — see [Sandboxing](#sandboxing) for the trade-offs.
 
 ## License
 

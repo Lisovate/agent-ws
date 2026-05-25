@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
+import { homedir } from "node:os";
 import { writeFileSync } from "node:fs";
 import type { Logger } from "../utils/logger.js";
 import type { PermissionMode } from "../server/protocol.js";
@@ -11,6 +12,7 @@ import {
   type RunHandlers,
 } from "./base-runner.js";
 import { ClaudeStreamParser } from "./claude-stream-parser.js";
+import type { Sandbox } from "./sandbox/types.js";
 
 export interface ClaudeRunnerOptions {
   claudePath?: string;
@@ -18,6 +20,7 @@ export interface ClaudeRunnerOptions {
   logger: Logger;
   sessionDir?: string;
   mode?: PermissionMode;
+  sandbox?: Sandbox;
 }
 
 const ALLOWED_ENV_KEYS = [
@@ -102,7 +105,13 @@ export class ClaudeRunner extends BaseRunner {
       mode: options.mode,
       agentLabel: "Claude",
       allowedEnvKeys: ALLOWED_ENV_KEYS,
+      sandbox: options.sandbox,
     });
+  }
+
+  protected credentialDirs(): string[] {
+    const home = homedir();
+    return [resolve(home, ".claude"), resolve(home, ".config", "claude")];
   }
 
   protected onBeforeRun(_options: RunOptions): void {

@@ -95,10 +95,49 @@ describe("AgentWebSocketServer", () => {
 
     expect(firstMsg).toEqual({
       type: "connected",
-      version: "1.0",
+      version: "1.1",
       agent: "agent-ws",
       mode: "safe",
     });
+  });
+
+  it("responds to capabilities request with active sandbox + provider probe", async () => {
+    createServer();
+    await server.start();
+
+    const { client: c } = await connect(port);
+    client = c;
+
+    client.send(JSON.stringify({ type: "capabilities" }));
+    const reply = await nextMessage(client);
+
+    expect(reply["type"]).toBe("capabilities");
+    expect(reply["agent"]).toBe("agent-ws");
+    expect(reply["version"]).toBe("1.1");
+    expect(reply["mode"]).toBe("safe");
+    expect(reply["sandbox"]).toMatchObject({
+      active: "none",
+      available: expect.arrayContaining(["none"]),
+    });
+    expect(reply["providers"]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "claude" }),
+      expect.objectContaining({ id: "codex" }),
+    ]));
+  });
+
+  it("capabilities responses are cached across requests", async () => {
+    createServer();
+    await server.start();
+
+    const { client: c } = await connect(port);
+    client = c;
+
+    client.send(JSON.stringify({ type: "capabilities" }));
+    const first = await nextMessage(client);
+    client.send(JSON.stringify({ type: "capabilities" }));
+    const second = await nextMessage(client);
+
+    expect(second).toEqual(first);
   });
 
   it("handles prompt message and streams chunks", async () => {
@@ -461,7 +500,7 @@ describe("AgentWebSocketServer", () => {
 
     expect(firstMsg).toEqual({
       type: "connected",
-      version: "1.0",
+      version: "1.1",
       agent: "agent-ws",
       mode: "unrestricted",
     });
